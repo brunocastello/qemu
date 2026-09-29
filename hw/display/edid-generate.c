@@ -48,11 +48,18 @@ static const struct edid_mode {
     { .xres = 1792,   .yres = 1344,   .xtra3 = 10,   .bit = 5 },
     { .xres = 1440,   .yres = 1050,   .xtra3 =  8,   .bit = 1 },
     { .xres = 1360,   .yres =  768,   .xtra3 =  8,   .bit = 7 },
+    { .xres = 1152,   .yres =  864,   .xtra3 =  6,   .bit = 0 },
+    { .xres = 2560,   .yres = 1440,   .xtra3 = 11,   .bit = 0 },
+    { .xres = 2560,   .yres = 1600,   .xtra3 = 11,   .bit = 1 },
+    { .xres = 1280,   .yres =  854,   .xtra3 = 11,   .bit = 2 },
+    { .xres = 1600,   .yres = 1024,   .xtra3 = 11,   .bit = 3 },
 
-    /* established timings (all @ 60Hz) */
+    /* established timings */
     { .xres = 1024,   .yres =  768,   .byte  = 36,   .bit = 3 },
+    { .xres =  832,   .yres =  624,   .byte  = 36,   .bit = 5 },
     { .xres =  800,   .yres =  600,   .byte  = 35,   .bit = 0 },
     { .xres =  640,   .yres =  480,   .byte  = 35,   .bit = 5 },
+    { .xres = 1152,   .yres =  870,   .byte  = 37,   .bit = 7 },
 };
 
 /*
@@ -216,13 +223,16 @@ static void edid_fill_modes(uint8_t *edid, uint8_t *xtra3, uint8_t *dta,
 
         if (mode->byte) {
             edid[mode->byte] |= (1 << mode->bit);
-        } else if (std < 54) {
-            rc = edid_std_mode(edid + std, mode->xres, mode->yres, hz);
-            if (rc == 0) {
-                std += 2;
+        } else {
+            if (std < 54) {
+                rc = edid_std_mode(edid + std, mode->xres, mode->yres, hz);
+                if (rc == 0) {
+                    std += 2;
+                }
             }
-        } else if (mode->xtra3 && xtra3) {
-            xtra3[mode->xtra3] |= (1 << mode->bit);
+            if (mode->xtra3 && xtra3) {
+                xtra3[mode->xtra3] |= (1 << mode->bit);
+            }
         }
 
         if (dta && mode->dta) {
