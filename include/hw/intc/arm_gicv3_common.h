@@ -242,6 +242,14 @@ struct GICv3State {
     int dev_fd; /* kvm device fd if backed by kvm vgic support */
     Error *migration_blocker;
 
+    /*
+     * Opaque distributor/redistributor state of an in-kernel GIC whose
+     * hypervisor only exports it as a blob (HVF); only valid between
+     * save_kernel_state and the end of the save, or while loading.
+     */
+    uint8_t *kernel_state;
+    uint32_t kernel_state_size;
+
     MemoryRegion *dma;
     AddressSpace dma_as;
 
@@ -315,6 +323,12 @@ struct ARMGICv3CommonClass {
 
     void (*pre_save)(GICv3State *s);
     void (*post_load)(GICv3State *s);
+    /*
+     * Fill / apply kernel_state.  load_kernel_state runs before post_load,
+     * so the CPU interface state can be restored on top of it.
+     */
+    int (*save_kernel_state)(GICv3State *s, Error **errp);
+    int (*load_kernel_state)(GICv3State *s, Error **errp);
 };
 
 void gicv3_init_irqs_and_mmio(GICv3State *s, qemu_irq_handler handler,

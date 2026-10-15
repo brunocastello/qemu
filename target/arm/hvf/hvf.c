@@ -13,6 +13,7 @@
 #include "qemu/error-report.h"
 #include "qapi/error.h"
 #include "hw/intc/arm_gic_common.h"
+#include "hw/intc/arm_gicv3_common.h"
 #include "qemu/log.h"
 #include <dlfcn.h>
 #include <AvailabilityMacros.h>
@@ -1419,6 +1420,143 @@ void hvf_arm_gic_reset(void)
     }
 }
 
+/*
+ * hv_gic_state_* serialize the distributor and the redistributors as an
+ * opaque, versioned blob; the CPU interfaces are not part of it.  Their
+ * ICC_* registers are only reachable from the owning vCPU thread and are
+ * carried in the GICv3CPUState fields the other GICv3 models use, in the
+ * order KVM restores them (SRE first, it changes what the rest mean).
+ */
+static uint64_t *hvf_arm_gic_icc_field(GICv3CPUState *c, unsigned i,
+                                       hv_gic_icc_reg_t *reg)
+    API_AVAILABLE(macos(15.0))
+{
+    switch (i) {
+    case 0:
+        *reg = HV_GIC_ICC_REG_SRE_EL1;
+        return &c->icc_sre_el1;
+    case 1:
+        *reg = HV_GIC_ICC_REG_CTLR_EL1;
+        return &c->icc_ctlr_el1[GICV3_NS];
+    case 2:
+        *reg = HV_GIC_ICC_REG_PMR_EL1;
+        return &c->icc_pmr_el1;
+    case 3:
+        *reg = HV_GIC_ICC_REG_BPR0_EL1;
+        return &c->icc_bpr[GICV3_G0];
+    case 4:
+        *reg = HV_GIC_ICC_REG_BPR1_EL1;
+        return &c->icc_bpr[GICV3_G1NS];
+    case 5:
+        *reg = HV_GIC_ICC_REG_AP0R0_EL1;
+        return &c->icc_apr[GICV3_G0][0];
+    case 6:
+        *reg = HV_GIC_ICC_REG_AP1R0_EL1;
+        return &c->icc_apr[GICV3_G1NS][0];
+    case 7:
+        *reg = HV_GIC_ICC_REG_IGRPEN0_EL1;
+        return &c->icc_igrpen[GICV3_G0];
+    case 8:
+        *reg = HV_GIC_ICC_REG_IGRPEN1_EL1;
+        return &c->icc_igrpen[GICV3_G1NS];
+    default:
+        return NULL;
+    }
+}
+
+static void hvf_arm_gic_get_icc(CPUState *cpu, run_on_cpu_data arg)
+{
+    GICv3CPUState *c = arg.host_ptr;
+    hv_gic_icc_reg_t reg;
+    uint64_t *field;
+
+    if (__builtin_available(macOS 15.0, *)) {
+        for (unsigned i = 0; (field = hvf_arm_gic_icc_field(c, i, &reg)); i++) {
+            assert_hvf_ok(hv_gic_get_icc_reg(cpu->accel->fd, reg, field));
+        }
+    }
+}
+
+static void hvf_arm_gic_set_icc(CPUState *cpu, run_on_cpu_data arg)
+{
+    GICv3CPUState *c = arg.host_ptr;
+    hv_gic_icc_reg_t reg;
+    uint64_t *field;
+
+    if (__builtin_available(macOS 15.0, *)) {
+        for (unsigned i = 0; (field = hvf_arm_gic_icc_field(c, i, &reg)); i++) {
+            assert_hvf_ok(hv_gic_set_icc_reg(cpu->accel->fd, reg, *field));
+        }
+    }
+}
+
+void hvf_arm_gic_save_cpu_state(GICv3State *s)
+{
+    for (unsigned i = 0; i < s->num_cpu; i++) {
+        run_on_cpu(s->cpu[i].cpu, hvf_arm_gic_get_icc,
+                   RUN_ON_CPU_HOST_PTR(&s->cpu[i]));
+    }
+}
+
+int hvf_arm_gic_save_state(GICv3State *s, Error **errp)
+{
+    if (__builtin_available(macOS 15.0, *)) {
+        hv_gic_state_t state;
+        size_t size;
+        hv_return_t ret;
+
+        /* only valid while every vCPU is stopped, which the save ensures */
+        state = hv_gic_state_create();
+        if (!state) {
+            error_setg(errp, "the HVF in-kernel GIC state cannot be saved");
+            return -1;
+        }
+        ret = hv_gic_state_get_size(state, &size);
+        if (ret == HV_SUCCESS && size > UINT32_MAX) {
+            ret = HV_NO_RESOURCES;
+        }
+        if (ret == HV_SUCCESS) {
+            s->kernel_state = g_malloc(size);
+            s->kernel_state_size = size;
+            ret = hv_gic_state_get_data(state, s->kernel_state);
+        }
+        os_release(state);
+        if (ret != HV_SUCCESS) {
+            g_clear_pointer(&s->kernel_state, g_free);
+            s->kernel_state_size = 0;
+            error_setg(errp, "saving the HVF in-kernel GIC state failed: %s",
+                       hvf_return_string(ret));
+            return -1;
+        }
+        return 0;
+    }
+    error_setg(errp, "the HVF in-kernel GIC needs macOS 15 or newer");
+    return -1;
+}
+
+int hvf_arm_gic_load_state(GICv3State *s, Error **errp)
+{
+    if (__builtin_available(macOS 15.0, *)) {
+        hv_return_t ret;
+
+        /* the blob first: the CPU interfaces are restored on top of it */
+        ret = hv_gic_set_state(s->kernel_state, s->kernel_state_size);
+        if (ret != HV_SUCCESS) {
+            error_setg(errp, "restoring the HVF in-kernel GIC state failed: "
+                       "%s (saved by an incompatible host?)",
+                       hvf_return_string(ret));
+            return -1;
+        }
+        for (unsigned i = 0; i < s->num_cpu; i++) {
+            run_on_cpu(s->cpu[i].cpu, hvf_arm_gic_set_icc,
+                       RUN_ON_CPU_HOST_PTR(&s->cpu[i]));
+        }
+        return 0;
+    }
+    error_setg(errp, "the HVF in-kernel GIC needs macOS 15 or newer");
+    return -1;
+}
+
 #else /* !TARGET_OS_OSX */
 
 bool hvf_arch_kernel_irqchip_available(void)
@@ -1452,6 +1590,22 @@ static void hvf_arm_gic_flush_ppis(CPUState *cpu)
 
 void hvf_arm_gic_reset(void)
 {
+}
+
+void hvf_arm_gic_save_cpu_state(GICv3State *s)
+{
+}
+
+int hvf_arm_gic_save_state(GICv3State *s, Error **errp)
+{
+    error_setg(errp, "the HVF in-kernel GIC is only available on macOS");
+    return -1;
+}
+
+int hvf_arm_gic_load_state(GICv3State *s, Error **errp)
+{
+    error_setg(errp, "the HVF in-kernel GIC is only available on macOS");
+    return -1;
 }
 
 #endif /* TARGET_OS_OSX */

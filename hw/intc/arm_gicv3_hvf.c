@@ -26,7 +26,6 @@
 #include "qemu/module.h"
 #include "system/hvf.h"
 #include "hvf_arm.h"
-#include "migration/blocker.h"
 #include "qom/object.h"
 
 #define TYPE_HVF_ARM_GICV3 "hvf-arm-gicv3"
@@ -103,12 +102,6 @@ static void hvf_arm_gicv3_realize(DeviceState *dev, Error **errp)
      * reach QEMU.
      */
     gicv3_init_irqs_and_mmio(s, hvf_arm_gicv3_set_irq, NULL);
-
-    error_setg(&s->migration_blocker,
-               "migration is not supported with the HVF in-kernel GIC");
-    if (migrate_add_blocker(&s->migration_blocker, errp) < 0) {
-        return;
-    }
 }
 
 static void hvf_arm_gicv3_reset_hold(Object *obj, ResetType type)
@@ -129,8 +122,16 @@ static void hvf_arm_gicv3_class_init(ObjectClass *klass, void *data)
     ARMGICv3CommonClass *agcc = ARM_GICV3_COMMON_CLASS(klass);
     HVFARMGICv3Class *hgc = HVF_ARM_GICV3_CLASS(klass);
 
-    agcc->pre_save = NULL;
+    /*
+     * The CPU interfaces travel in the common per-CPU fields, which are
+     * written before the kernel_state subsection; that subsection carries
+     * the opaque distributor/redistributor blob and its load restores the
+     * CPU interfaces on top of it.
+     */
+    agcc->pre_save = hvf_arm_gic_save_cpu_state;
     agcc->post_load = NULL;
+    agcc->save_kernel_state = hvf_arm_gic_save_state;
+    agcc->load_kernel_state = hvf_arm_gic_load_state;
     device_class_set_parent_realize(dc, hvf_arm_gicv3_realize,
                                     &hgc->parent_realize);
     resettable_class_set_parent_phases(rc, NULL, hvf_arm_gicv3_reset_hold,

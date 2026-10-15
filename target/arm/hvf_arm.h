@@ -13,6 +13,8 @@
 
 #include "cpu.h"
 
+typedef struct GICv3State GICv3State;
+
 /**
  * hvf_arm_init_debug() - initialize guest debug capabilities
  *
@@ -40,6 +42,14 @@ bool hvf_arm_gic_created(void);
 void hvf_arm_gic_set_spi(uint32_t intid, int level);
 void hvf_arm_gic_set_ppi(CPUState *cpu, uint32_t intid, int level);
 void hvf_arm_gic_reset(void);
+/*
+ * Save/restore: the distributor and redistributors travel as the opaque
+ * hv_gic_state blob in s->kernel_state, the CPU interfaces in s->cpu[].
+ * All three require every vCPU to be stopped.
+ */
+void hvf_arm_gic_save_cpu_state(GICv3State *s);
+int hvf_arm_gic_save_state(GICv3State *s, Error **errp);
+int hvf_arm_gic_load_state(GICv3State *s, Error **errp);
 
 #else
 
@@ -65,6 +75,20 @@ static inline void hvf_arm_gic_set_ppi(CPUState *cpu, uint32_t intid,
 
 static inline void hvf_arm_gic_reset(void)
 {
+}
+
+static inline void hvf_arm_gic_save_cpu_state(GICv3State *s)
+{
+}
+
+static inline int hvf_arm_gic_save_state(GICv3State *s, Error **errp)
+{
+    return -1;
+}
+
+static inline int hvf_arm_gic_load_state(GICv3State *s, Error **errp)
+{
+    return -1;
 }
 
 static inline uint32_t hvf_arm_get_default_ipa_bit_size(void)

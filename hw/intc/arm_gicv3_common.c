@@ -276,6 +276,70 @@ const VMStateDescription vmstate_gicv3_gicd_nmi = {
     }
 };
 
+static bool gicv3_kernel_state_needed(void *opaque)
+{
+    ARMGICv3CommonClass *c = ARM_GICV3_COMMON_GET_CLASS(opaque);
+
+    return c->save_kernel_state != NULL;
+}
+
+static int gicv3_kernel_state_pre_save(void *opaque)
+{
+    GICv3State *s = opaque;
+    ARMGICv3CommonClass *c = ARM_GICV3_COMMON_GET_CLASS(s);
+    Error *local_err = NULL;
+
+    if (c->save_kernel_state(s, &local_err) < 0) {
+        error_report_err(local_err);
+        return -EINVAL;
+    }
+    return 0;
+}
+
+static int gicv3_kernel_state_post_save(void *opaque)
+{
+    GICv3State *s = opaque;
+
+    g_clear_pointer(&s->kernel_state, g_free);
+    s->kernel_state_size = 0;
+    return 0;
+}
+
+static int gicv3_kernel_state_post_load(void *opaque, int version_id)
+{
+    GICv3State *s = opaque;
+    ARMGICv3CommonClass *c = ARM_GICV3_COMMON_GET_CLASS(s);
+    Error *local_err = NULL;
+    int ret = 0;
+
+    if (!c->load_kernel_state) {
+        error_report("%s cannot load the state of an in-kernel GIC",
+                     object_get_typename(OBJECT(s)));
+        ret = -EINVAL;
+    } else if (c->load_kernel_state(s, &local_err) < 0) {
+        error_report_err(local_err);
+        ret = -EINVAL;
+    }
+    gicv3_kernel_state_post_save(s);
+    return ret;
+}
+
+static const VMStateDescription vmstate_gicv3_kernel_state = {
+    .name = "arm_gicv3/kernel_state",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = gicv3_kernel_state_needed,
+    .pre_save = gicv3_kernel_state_pre_save,
+    .post_save = gicv3_kernel_state_post_save,
+    .post_load = gicv3_kernel_state_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32(kernel_state_size, GICv3State),
+        VMSTATE_VBUFFER_ALLOC_UINT32(kernel_state, GICv3State, 0, NULL,
+                                     kernel_state_size),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static const VMStateDescription vmstate_gicv3 = {
     .name = "arm_gicv3",
     .version_id = 1,
@@ -305,6 +369,7 @@ static const VMStateDescription vmstate_gicv3 = {
     .subsections = (const VMStateDescription * const []) {
         &vmstate_gicv3_gicd_no_migration_shift_bug,
         &vmstate_gicv3_gicd_nmi,
+        &vmstate_gicv3_kernel_state,
         NULL
     }
 };
