@@ -67,7 +67,14 @@ system_ss.add(when: 'CONFIG_ATI_VGA', if_true: [files('ati.c', 'ati_2d.c', 'ati_
 # libraries, which need its other parts and the C++ runtime.
 r300_shader_deps = []
 if config_all_devices.has_key('CONFIG_PPC_MAC_GPU')
-  shaderc = dependency('shaderc', required: true, method: 'pkg-config')
+  # UTM's sysroot has only the static shaderc_combined (C++, so libc++)
+  shaderc = dependency('shaderc_combined', required: false, method: 'pkg-config')
+  if shaderc.found()
+    shaderc = declare_dependency(dependencies: shaderc, link_args:
+                                 host_os == 'darwin' ? ['-lc++'] : ['-lstdc++'])
+  else
+    shaderc = dependency('shaderc', required: true, method: 'pkg-config')
+  endif
   spirv_cross = dependency('spirv-cross-c-shared', required: false, method: 'pkg-config')
   if spirv_cross.found()
     r300_shader_deps = [shaderc, spirv_cross]
@@ -99,7 +106,7 @@ system_ss.add(when: 'CONFIG_PPC_MAC_GPU', if_true: [files(
 # it the device refuses renderer=vulkan.
 if config_all_devices.has_key('CONFIG_PPC_MAC_GPU')
   ppc_vulkan = dependency('vulkan', required: false, method: 'pkg-config')
-  if ppc_vulkan.found()
+  if ppc_vulkan.found() and cc.has_header('vulkan/vulkan.h', dependencies: ppc_vulkan)
     system_ss.add(when: 'CONFIG_PPC_MAC_GPU', if_true: [
       files('ppc_mac_gpu_vulkan.c'), ppc_vulkan,
       declare_dependency(compile_args: ['-DCONFIG_PPC_MAC_GPU_VULKAN'])])

@@ -47,6 +47,7 @@ blobs = [
   'openbios-sparc32',
   'openbios-sparc64',
   'openbios-ppc',
+  'openbios-ppc-r300',
   'QEMU,tcx.bin',
   'QEMU,cgthree.bin',
   'pxe-e1000.rom',
