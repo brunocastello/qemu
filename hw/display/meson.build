@@ -61,6 +61,58 @@ system_ss.add(when: 'CONFIG_ARTIST', if_true: files('artist.c'))
 
 system_ss.add(when: 'CONFIG_ATI_VGA', if_true: [files('ati.c', 'ati_2d.c', 'ati_dbg.c'), pixman])
 
+# The R300 fragment programs are generated as GLSL and compiled at run time
+# with shaderc (GLSL -> SPIR-V); SPIRV-Cross turns SPIR-V into MSL for the
+# Metal backend.  Homebrew ships SPIRV-Cross's C API only as static
+# libraries, which need its other parts and the C++ runtime.
+r300_shader_deps = []
+if config_all_devices.has_key('CONFIG_PPC_MAC_GPU')
+  shaderc = dependency('shaderc', required: true, method: 'pkg-config')
+  spirv_cross = dependency('spirv-cross-c-shared', required: false, method: 'pkg-config')
+  if spirv_cross.found()
+    r300_shader_deps = [shaderc, spirv_cross]
+  else
+    spirv_cross = dependency('spirv-cross-c', required: true, method: 'pkg-config')
+    spvc_libdir = spirv_cross.get_variable(pkgconfig: 'libdir')
+    spvc_libs = [spirv_cross]
+    foreach l : ['msl', 'hlsl', 'cpp', 'reflect', 'glsl', 'util', 'core']
+      spvc_libs += cc.find_library('spirv-cross-' + l, dirs: [spvc_libdir], required: true)
+    endforeach
+    spvc_libs += declare_dependency(link_args: host_os == 'darwin' ? ['-lc++'] : ['-lstdc++'])
+    r300_shader_deps = [shaderc] + spvc_libs
+  endif
+endif
+
+system_ss.add(when: 'CONFIG_PPC_MAC_GPU', if_true: [files(
+  'ppc_mac_gpu.c',
+  'r300/r300_state.c',
+  'r300/r300_pvs.c',
+  'r300/r300_us.c',
+  'r300/r300_spirv.c',
+  'r300/r300_draw.c',
+  'ppc_mac_gpu_renderer_sw.c',
+  'ppc_mac_gpu_vp.c',
+), pixman] + r300_shader_deps)
+
+# Vulkan backend for the R300 (renderer=vulkan): MoltenVK through the
+# Vulkan loader on macOS, the loader alone elsewhere.  Optional: without
+# it the device refuses renderer=vulkan.
+if config_all_devices.has_key('CONFIG_PPC_MAC_GPU')
+  ppc_vulkan = dependency('vulkan', required: false, method: 'pkg-config')
+  if ppc_vulkan.found()
+    system_ss.add(when: 'CONFIG_PPC_MAC_GPU', if_true: [
+      files('ppc_mac_gpu_vulkan.c'), ppc_vulkan,
+      declare_dependency(compile_args: ['-DCONFIG_PPC_MAC_GPU_VULKAN'])])
+  endif
+endif
+
+if host_os == 'darwin'
+  metal_fw = dependency('appleframeworks', modules: ['Metal', 'QuartzCore'], required: false)
+  if metal_fw.found()
+    system_ss.add(when: 'CONFIG_PPC_MAC_GPU', if_true: [files('ppc_mac_gpu_metal.m'), metal_fw])
+  endif
+endif
+
 system_ss.add(when: [pvg, 'CONFIG_MAC_PVG_PCI'],     if_true: [files('apple-gfx.m', 'apple-gfx-pci.m')])
 system_ss.add(when: [pvg, 'CONFIG_MAC_PVG_MMIO'],    if_true: [files('apple-gfx.m', 'apple-gfx-mmio.m')])
 
