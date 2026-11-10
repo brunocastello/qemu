@@ -1,0 +1,36 @@
+name: Build qemu-system-ppc (macOS arm64, self-contained)
+on:
+  workflow_dispatch:
+  push:
+    branches: [r300-port]
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 1 }
+      - name: Dependencies
+        run: |
+          brew install ninja pkgconf glib pixman libslirp shaderc spirv-cross glslang vulkan-headers vulkan-loader molten-vk dylibbundler
+          python3 -m venv /tmp/venv && /tmp/venv/bin/pip install -q distlib tomli
+      - name: Configure and build
+        run: |
+          mkdir build && cd build
+          ../configure --python=/tmp/venv/bin/python3 --target-list=ppc-softmmu \
+            --disable-docs --disable-sdl --disable-werror -Doptimization=2
+          ninja qemu-system-ppc qemu-img
+      - name: Bundle Homebrew dylibs next to the binary
+        run: |
+          mkdir -p dist/lib
+          cp build/qemu-system-ppc build/qemu-img dist/
+          dylibbundler -of -b -x dist/qemu-system-ppc -x dist/qemu-img -d dist/lib -p @executable_path/lib/
+          # MoltenVK ICD is loaded at runtime by the Vulkan loader; ship it too
+          cp "$(brew --prefix molten-vk)/lib/libMoltenVK.dylib" dist/lib/ || true
+          cp -R pc-bios dist/pc-bios
+          for f in dist/qemu-system-ppc dist/qemu-img dist/lib/*.dylib; do codesign -f -s - "$f"; done
+          otool -L dist/qemu-system-ppc | grep -v -E "@executable_path|/usr/lib|/System" && echo "UNBUNDLED DEPS ABOVE" || echo "all deps bundled"
+          tar -czf qemu-ppc-r300-macos-arm64.tgz -C dist .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: qemu-ppc-r300-macos-arm64
+          path: qemu-ppc-r300-macos-arm64.tgz
