@@ -7280,6 +7280,15 @@ static void ppc_cpu_reset_hold(Object *obj, ResetType type)
     hreg_store_msr(env, msr, 1);
 
 #if !defined(CONFIG_USER_ONLY)
+    /*
+     * The BAT arrays live outside env->spr[], so the default_value loop
+     * at the end of this function does not clear them.  Without this a
+     * guest's BAT mappings survive system_reset, and firmware that turns
+     * translation on before rewriting every BAT (OpenBIOS) fetches through
+     * them.  Give reset the same MMU state as power-on.
+     */
+    memset(env->IBAT, 0, sizeof(env->IBAT));
+    memset(env->DBAT, 0, sizeof(env->DBAT));
     env->nip = env->hreset_vector | env->excp_prefix;
 
     if (tcg_enabled()) {
