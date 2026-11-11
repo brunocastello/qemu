@@ -1651,7 +1651,15 @@ static void ppc_mac_gpu_cp_rate_log(double sec)
 
 static bool ppc_gpu_dirty_scanout = true;   /* read from env in realize */
 static bool ppc_gpu_flip_kick = true;
-static bool ppc_gpu_async_present = true;
+/*
+ * Deferred ("async") present is off by default.  While the guest composites
+ * continuously (Quartz Extreme window drag at ~47 frames/s) the scanout range
+ * is busy on almost every refresh, so each tick was deferred and the next
+ * tick found new work again: only ~12 of 33 refreshes per second reached the
+ * screen.  The synchronous flush it avoids costs ~0.1% GPU wait.
+ * PPCGPU_ASYNC_PRESENT=1 turns it back on.
+ */
+static bool ppc_gpu_async_present;
 
 /*
  * Render-queue completion for a deferred present (see the head of
@@ -12746,7 +12754,10 @@ static void ppc_mac_gpu_realize(PCIDevice *dev, Error **errp)
      */
     ppc_gpu_dirty_scanout = ppc_gpu_env_on("PPCGPU_DIRTY_SCANOUT");
     ppc_gpu_flip_kick = ppc_gpu_env_on("PPCGPU_FLIP_KICK");
-    ppc_gpu_async_present = ppc_gpu_env_on("PPCGPU_ASYNC_PRESENT");
+    {
+        const char *ap = getenv("PPCGPU_ASYNC_PRESENT");
+        ppc_gpu_async_present = ap && strcmp(ap, "0") != 0;
+    }
     s->scanout_log_owner = !s->renderer || !s->renderer->set_dirty_source;
 
     /* Set PCI config space fields */
