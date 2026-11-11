@@ -17,7 +17,7 @@ jobs:
         run: |
           mkdir build && cd build
           ../configure --python=/tmp/venv/bin/python3 --target-list=ppc-softmmu \
-            --disable-docs --disable-sdl --disable-werror -Doptimization=2 --enable-spice
+            --disable-docs --disable-sdl --disable-werror -Doptimization=2 --enable-spice --disable-dbus-display --disable-opengl
           ninja qemu-system-ppc qemu-img
       - name: Bundle Homebrew dylibs next to the binary
         run: |
