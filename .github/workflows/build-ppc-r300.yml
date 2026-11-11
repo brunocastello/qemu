@@ -11,13 +11,13 @@ jobs:
         with: { fetch-depth: 1 }
       - name: Dependencies
         run: |
-          brew install ninja pkgconf glib pixman libslirp shaderc spirv-cross glslang vulkan-headers vulkan-loader molten-vk dylibbundler
+          brew install ninja pkgconf glib pixman libslirp shaderc spirv-cross glslang vulkan-headers vulkan-loader molten-vk dylibbundler spice-protocol spice-server
           python3 -m venv /tmp/venv && /tmp/venv/bin/pip install -q distlib tomli
       - name: Configure and build
         run: |
           mkdir build && cd build
           ../configure --python=/tmp/venv/bin/python3 --target-list=ppc-softmmu \
-            --disable-docs --disable-sdl --disable-werror -Doptimization=2
+            --disable-docs --disable-sdl --disable-werror -Doptimization=2 --enable-spice
           ninja qemu-system-ppc qemu-img
       - name: Bundle Homebrew dylibs next to the binary
         run: |
