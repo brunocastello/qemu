@@ -528,6 +528,13 @@ static bool r200_async_submit(PPCMacGPUState *s, const uint32_t *d,
     return true;
 }
 
+/* Register-access flushes are tagged by register; others by a tag below. */
+#define R200_WHY_REG(a)   ((uint32_t)(a) / 4)
+#define R200_WHY_TAG(t)   (0x4000u + (t))
+enum { R200_WHY_T3 = 1, R200_WHY_DISPLAY, R200_WHY_FENCE, R200_WHY_OTHER };
+
+static void ppc_mac_gpu_frame_ready(PPCMacGPUState *s);
+
 static void r200_flush_at(PPCMacGPUState *s, uint32_t why)
 {
     /*
@@ -542,6 +549,12 @@ static void r200_flush_at(PPCMacGPUState *s, uint32_t why)
         if (did) {
             r200_rate.flushes++;
             r200_rate.flush_us += g_get_monotonic_time() - t0;
+        }
+        /* Drawing finished: get it on screen soon.  The display's own
+         * flush (below the refresh) must not re-arm the kick, or an idle
+         * desktop would refresh at 60 Hz forever. */
+        if (did && why != R200_WHY_TAG(R200_WHY_DISPLAY)) {
+            ppc_mac_gpu_frame_ready(s);
         }
         if (did) {
             r200_flush_why[MIN(why, (uint32_t)ARRAY_SIZE(r200_flush_why) - 1)]++;
@@ -573,10 +586,6 @@ static void r200_flush_at(PPCMacGPUState *s, uint32_t why)
         }
     }
 }
-/* Register-access flushes are tagged by register; others by a tag below. */
-#define R200_WHY_REG(a)   ((uint32_t)(a) / 4)
-#define R200_WHY_TAG(t)   (0x4000u + (t))
-enum { R200_WHY_T3 = 1, R200_WHY_DISPLAY, R200_WHY_FENCE, R200_WHY_OTHER };
 #define r200_flush(s) r200_flush_at((s), R200_WHY_TAG(R200_WHY_OTHER))
 enum { R200_WHY_2D = 0x40 };
 
@@ -1651,6 +1660,7 @@ static void ppc_mac_gpu_cp_rate_log(double sec)
 
 static bool ppc_gpu_dirty_scanout = true;   /* read from env in realize */
 static bool ppc_gpu_flip_kick = true;
+static bool ppc_gpu_frame_kick = true;
 /*
  * Deferred ("async") present is off by default.  While the guest composites
  * continuously (Quartz Extreme window drag at ~47 frames/s) the scanout range
@@ -1675,9 +1685,41 @@ static void ppc_mac_gpu_present_done(void *arg, uint32_t seq)
     dpy_refresh_soon(s->con);
 }
 
+/*
+ * Frame kick.  The UI polls the display every 30 ms (SPICE's default), so a
+ * guest compositing ~50 frames/s (Tiger's Quartz Extreme during a window
+ * drag) was shown at most ~33 times a second.  When the guest finishes a
+ * batch of drawing, ask for a refresh as soon as 16 ms have passed since the
+ * last one: up to ~60 frames/s while it draws, and nothing extra when idle
+ * (the 30 ms poll continues as before).  PPCGPU_FRAME_KICK=0 turns it off.
+ */
+#define PPC_GPU_FRAME_KICK_MS 16
+
+static void ppc_mac_gpu_frame_kick_cb(void *opaque)
+{
+    PPCMacGPUState *s = opaque;
+
+    dpy_refresh_soon(s->con);
+}
+
+static void ppc_mac_gpu_frame_ready(PPCMacGPUState *s)
+{
+    int64_t now, due;
+
+    if (!ppc_gpu_frame_kick || !s->con ||
+        timer_pending(&s->frame_kick_timer)) {
+        return;
+    }
+    now = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+    due = qatomic_read(&s->last_scanout_ms) + PPC_GPU_FRAME_KICK_MS;
+    timer_mod(&s->frame_kick_timer, MAX(now, due));
+}
+
 static void ppc_mac_gpu_display_update(void *opaque)
 {
     PPCMacGPUState *s = opaque;
+
+    qatomic_set(&s->last_scanout_ms, qemu_clock_get_ms(QEMU_CLOCK_REALTIME));
 
     /* A machine that has just been woken: give the window the pointer the
      * sleeping one had (see ppc_mac_gpu_post_load). */
@@ -12477,6 +12519,8 @@ static void ppc_mac_gpu_realize(PCIDevice *dev, Error **errp)
     /* Initialize VBlank timer */
     timer_init_ns(&s->vblank_timer, QEMU_CLOCK_VIRTUAL,
                   ppc_mac_gpu_vblank, s);
+    timer_init_ms(&s->frame_kick_timer, QEMU_CLOCK_REALTIME,
+                  ppc_mac_gpu_frame_kick_cb, s);
 
     /*
      * ROM handling:
@@ -12754,6 +12798,7 @@ static void ppc_mac_gpu_realize(PCIDevice *dev, Error **errp)
      */
     ppc_gpu_dirty_scanout = ppc_gpu_env_on("PPCGPU_DIRTY_SCANOUT");
     ppc_gpu_flip_kick = ppc_gpu_env_on("PPCGPU_FLIP_KICK");
+    ppc_gpu_frame_kick = ppc_gpu_env_on("PPCGPU_FRAME_KICK");
     {
         const char *ap = getenv("PPCGPU_ASYNC_PRESENT");
         ppc_gpu_async_present = ap && strcmp(ap, "0") != 0;
@@ -12843,6 +12888,7 @@ static void ppc_mac_gpu_exit(PCIDevice *dev)
 
     ppc_mac_gpu_cp_stop();
     timer_del(&s->vblank_timer);
+    timer_del(&s->frame_kick_timer);
     g_free(s->shadow_buf);
     s->shadow_buf = NULL;
     g_free(s->draw_verts);

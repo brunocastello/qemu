@@ -767,6 +767,10 @@ struct PPCMacGPUState {
     uint32_t present_wait_seq;    /* submit_r200 seq we are waiting on, 0 = no */
     int64_t present_defer_us;     /* monotonic us the current wait started */
     int64_t last_flip_kick;       /* monotonic us of the last refresh kick */
+    /* Frame kick (PPCGPU_FRAME_KICK): a refresh shortly after the guest
+     * finishes drawing, instead of waiting for the 30 ms UI poll. */
+    QEMUTimer frame_kick_timer;
+    int64_t last_scanout_ms;      /* QEMU_CLOCK_REALTIME ms of the last display update */
 
     /* Compositor-direct display: instead of reading the framebuffer
      * (which may have gaps during drag due to missing screen-to-screen
