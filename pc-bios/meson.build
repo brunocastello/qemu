@@ -79,6 +79,7 @@ blobs = [
   'u-boot.e500',
   'u-boot-sam460-20100605.bin',
   'qemu_vga.ndrv',
+  'qemu_vga_hwc.ndrv',
   'edk2-licenses.txt',
   'hppa-firmware.img',
   'hppa-firmware64.img',

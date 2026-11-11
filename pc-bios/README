@@ -20,6 +20,14 @@
   OpenBIOS.  Select it with -bios openbios-ppc-r300 together with
   -global uni-north-pci.agp-capable=on.
 
+- qemu_vga_hwc.ndrv is the QEMU VGA NDRV (ozbenh/QemuMacDrivers) patched for
+  a hardware cursor at BAR2+0xFF00 and extra modes, which the ati-radeon-9700
+  device implements; without it Mac OS X draws a software cursor that leaves
+  traces over GL surfaces.  From linuxkid473/ppc-osx-vgpu
+  (firmware/radeon/qemu_vga_hwc.ndrv, built by firmware/src/ndrv/build.py,
+  patcher from Spartan0285/PowerEmu).  GPL v2.  Select it with
+  -machine mac99,ndrv=qemu_vga_hwc.ndrv.
+
 - SLOF (Slimline Open Firmware) is a free IEEE 1275 Open Firmware
   implementation for certain IBM POWER hardware.  The sources are at
   https://gitlab.com/slof/slof, and the image currently in qemu is
