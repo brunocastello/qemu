@@ -74,8 +74,16 @@ static const char *s_spk = "screamer";
  */
 #define SCREAMER_FIFO_FRAMES 128
 #define SCREAMER_TX_TICK_NS  (1 * SCALE_MS)
+/*
+ * If the pacing timer fires late (the host was busy, TCG held the main loop),
+ * the time it missed is not lost: a deferred transfer may catch up by up to
+ * this many frames, or the codec would run slow against real time and the
+ * host backend would underrun.  Idle time never accrues this credit.
+ * Catch-up idea from poweremu-qemu's screamer pacing (MIT).
+ */
+#define SCREAMER_CATCHUP_FRAMES(s) ((s)->rate / 20)         /* 50 ms */
 
-static void screamer_tx_credit_update(ScreamerState *s)
+static void screamer_tx_credit_update(ScreamerState *s, uint32_t cap)
 {
     int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
     uint64_t frames;
@@ -85,7 +93,7 @@ static void screamer_tx_credit_update(ScreamerState *s)
     }
     frames = muldiv64(now - s->tx_last_ns, s->rate, NANOSECONDS_PER_SECOND);
     s->tx_last_ns += muldiv64(frames, NANOSECONDS_PER_SECOND, s->rate);
-    s->tx_credit = MIN(s->tx_credit + frames, SCREAMER_FIFO_FRAMES);
+    s->tx_credit = MIN(s->tx_credit + frames, cap);
 }
 
 /* Copy guest frames into the ring; drop the oldest if the host lags */
@@ -117,12 +125,12 @@ static void screamer_ring_write(ScreamerState *s, hwaddr addr, uint32_t frames)
     }
 }
 
-static void pmac_screamer_tx_transfer(ScreamerState *s)
+static void pmac_screamer_tx_transfer(ScreamerState *s, uint32_t cap)
 {
     DBDMA_io *io = &s->io;
     uint32_t frames;
 
-    screamer_tx_credit_update(s);
+    screamer_tx_credit_update(s, cap);
     frames = MIN(io->len >> s->shift, s->tx_credit);
 
     if (frames) {
@@ -158,7 +166,7 @@ static void screamer_tx_timer_cb(void *opaque)
 
     if (s->io.len) {
         SCREAMER_DPRINTF("Continue deferred transfer\n");
-        pmac_screamer_tx_transfer(s);
+        pmac_screamer_tx_transfer(s, SCREAMER_CATCHUP_FRAMES(s));
     }
 }
 
@@ -170,7 +178,7 @@ static void pmac_screamer_tx(DBDMA_io *io)
                      " len: %x\n", io->addr, io->len);
 
     memcpy(&s->io, io, sizeof(DBDMA_io));
-    pmac_screamer_tx_transfer(s);
+    pmac_screamer_tx_transfer(s, SCREAMER_FIFO_FRAMES);
 }
 
 static void pmac_screamer_tx_flush(DBDMA_io *io)
