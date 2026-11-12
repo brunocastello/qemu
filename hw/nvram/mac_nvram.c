@@ -318,13 +318,25 @@ void pmac_format_nvram_banks(MacIONVRAMState *nvr, int bank)
     pmac_format_nvram_partition_osx(&nvr->data[bank], bank);
 }
 
-/* An OldWorld Mac: one bank, addressed with a stride, as it always was. */
+/*
+ * The original layout, byte for byte: Open Firmware's partitions in the
+ * first half, one empty Mac OS X partition in the second. OldWorld Macs use
+ * it, and so does mac99 unless osx-nvram is set, so existing VMs and their
+ * saved states are unchanged.
+ */
 void pmac_format_nvram_partition(MacIONVRAMState *nvr, int len)
 {
-    g_autofree uint8_t *of = g_malloc0(len / 2);
+    ChrpNvramPartHdr *part_header;
+    unsigned char *data = &nvr->data[len / 2];
+    int half = len / 2;
 
-    pmac_format_nvram_partition_of(of, len / 2);
-    memcpy(nvr->data, of, len / 2);
-    pmac_format_nvram_partition_osx(&nvr->data[len / 2], len / 2);
+    pmac_format_nvram_partition_of(nvr->data, half);
+
+    part_header = (ChrpNvramPartHdr *)data;
+    part_header->signature = OSX_NVRAM_SIGNATURE;
+    pstrcpy(part_header->name, sizeof(part_header->name), "wwwwwwwwwwww");
+    chrp_nvram_finish_partition(part_header, half);
+    stl_be_p(&data[20], 2);                                 /* generation */
+    stl_be_p(&data[16], adler32(0, &data[20], half - 20));  /* checksum */
 }
 type_init(macio_nvram_register_types)
