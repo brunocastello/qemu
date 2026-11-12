@@ -5,7 +5,11 @@ on:
     branches: [r300-port]
 jobs:
   build:
-    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, macos-15]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 1 }
@@ -36,5 +40,5 @@ jobs:
           tar -czf qemu-ppc-r300-macos-arm64.tgz -C dist .
       - uses: actions/upload-artifact@v4
         with:
-          name: qemu-ppc-r300-macos-arm64
+          name: qemu-ppc-r300-macos-arm64-${{ matrix.os }}
           path: qemu-ppc-r300-macos-arm64.tgz
