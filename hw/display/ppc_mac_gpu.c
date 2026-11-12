@@ -5385,6 +5385,21 @@ static void ppc_mac_gpu_2d_blit_sep(PPCMacGPUState *s)
             bool fast = !wup_log &&
                         !mc_rect_is_tiled(s, dst_offset, dst_pitch,
                                           dst_x, dst_y, bpp);
+            {
+                /* DEBUG (r300-mipcheck): each GART/AGP upload's format */
+                static int mc_init, mc_n;
+                static bool mc_on;
+                if (!mc_init) {
+                    mc_init = 1;
+                    mc_on = getenv("R300_MIPCHECK") != NULL;
+                }
+                if (mc_on && s->r300 && mc_n < 4000) {
+                    mc_n++;
+                    qemu_log("mipcheck upload: dst %08x pitch %u xy %u,%u %ux%u bpp %u swap %u%s\n",
+                             dst_offset, dst_pitch, dst_x, dst_y, blit_w, blit_h,
+                             bpp, s->r300_src_swap, fast ? "" : " (slow path)");
+                }
+            }
             if (fast) {
                 gart_blit_rows(s, as, src_is_gart, src_offset, src_pitch,
                                src_x, src_y, vram, dst_offset, dst_pitch,
