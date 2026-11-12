@@ -1,0 +1,16 @@
+Hardware-cursor NDRV for the ATI Radeon 9700 (ati-radeon-9700 / ppc_mac_gpu)
+============================================================================
+
+pc-bios/qemu_vga_hwc.ndrv is QemuMacDrivers' qemu_vga.ndrv (qemu_vga.orig.ndrv
+here) with its hardware-cursor stubs patched to drive the device's cursor
+registers at MMIO BAR + 0xFF00. See the docstring in build.py and the register
+list in hw/display/ppc_mac_gpu.c.
+
+Origin: firmware/src/ndrv of https://github.com/linuxkid473/ppc-osx-vgpu
+(GPL-2.0). Local change: the SetHardwareCursor routine also sends the cursor
+hotspot (IOHardwareCursorInfo.cursorHotSpotX/Y) through register 0x1C, so the
+host can put the pointer on the cursor's tip instead of the image's corner.
+
+Rebuild (plain Python 3, no other dependencies):
+
+    python3 build.py qemu_vga.orig.ndrv ../../pc-bios/qemu_vga_hwc.ndrv

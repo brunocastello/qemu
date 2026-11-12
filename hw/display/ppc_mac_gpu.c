@@ -534,6 +534,8 @@ static bool r200_async_submit(PPCMacGPUState *s, const uint32_t *d,
 enum { R200_WHY_T3 = 1, R200_WHY_DISPLAY, R200_WHY_FENCE, R200_WHY_OTHER };
 
 static void ppc_mac_gpu_frame_ready(PPCMacGPUState *s);
+static void ppc_mac_gpu_hwc_define(PPCMacGPUState *s);
+static void ppc_mac_gpu_hwc_move(PPCMacGPUState *s);
 
 static void r200_flush_at(PPCMacGPUState *s, uint32_t why)
 {
@@ -1725,15 +1727,8 @@ static void ppc_mac_gpu_display_update(void *opaque)
      * sleeping one had (see ppc_mac_gpu_post_load). */
     if (s->hwc_announce && s->con) {
         s->hwc_announce = false;
-        if (s->hwc_w && s->hwc_h) {
-            QEMUCursor *c = cursor_alloc(s->hwc_w, s->hwc_h);
-            c->hot_x = 0;               /* X/Y are the image's top-left */
-            c->hot_y = 0;
-            memcpy(c->data, s->hwc_pix, s->hwc_w * s->hwc_h * 4);
-            dpy_cursor_define(s->con, c);
-            cursor_unref(c);
-        }
-        dpy_mouse_set(s->con, s->hwc_x, s->hwc_y, s->hwc_visible);
+        ppc_mac_gpu_hwc_define(s);
+        ppc_mac_gpu_hwc_move(s);
     }
 
     {
@@ -9747,10 +9742,42 @@ static bool is_r300_register(uint32_t addr)
  * Registers at MMIO BAR + 0xFF00, 32-bit little-endian:
  *   00 SIZE w|h<<16 (starts an upload)  04 DATA ARGB pixel  08 COMMIT
  *   0C X  10 Y (image top-left, signed)  14 SHOW bit 0  18 ID 'HWC1'
+ *   1C HOT x|y<<16 (hotspot inside the image, before COMMIT; optional)
  */
 #define PPC_MAC_GPU_HWC_BASE  0xFF00
 #define PPC_MAC_GPU_HWC_END   0xFF20
 #define PPC_MAC_GPU_HWC_MAGIC 0x48574331
+
+/*
+ * X/Y from the NDRV are the image's top-left. The hotspot (reg 0x1C) puts
+ * the host pointer on the cursor's tip: SPICE client mode draws the image
+ * at pointer - hot, and server mode wants the hotspot's screen position.
+ */
+static void ppc_mac_gpu_hwc_define(PPCMacGPUState *s)
+{
+    QEMUCursor *c;
+
+    if (!s->hwc_w || !s->hwc_h || !s->con) {
+        return;
+    }
+    c = cursor_alloc(s->hwc_w, s->hwc_h);
+    c->hot_x = MIN(s->hwc_hot_x, s->hwc_w - 1);
+    c->hot_y = MIN(s->hwc_hot_y, s->hwc_h - 1);
+    memcpy(c->data, s->hwc_pix, s->hwc_w * s->hwc_h * 4);
+    dpy_cursor_define(s->con, c);
+    cursor_unref(c);
+}
+
+static void ppc_mac_gpu_hwc_move(PPCMacGPUState *s)
+{
+    if (!s->con) {
+        return;
+    }
+    dpy_mouse_set(s->con,
+                  s->hwc_x + (int32_t)MIN(s->hwc_hot_x, MAX(s->hwc_w, 1) - 1),
+                  s->hwc_y + (int32_t)MIN(s->hwc_hot_y, MAX(s->hwc_h, 1) - 1),
+                  s->hwc_visible);
+}
 
 static void ppc_mac_gpu_hwc_write(PPCMacGPUState *s, uint32_t reg, uint32_t val)
 {
@@ -9766,14 +9793,7 @@ static void ppc_mac_gpu_hwc_write(PPCMacGPUState *s, uint32_t reg, uint32_t val)
         }
         break;
     case 0x08:
-        if (s->hwc_w && s->hwc_h && s->con) {
-            QEMUCursor *c = cursor_alloc(s->hwc_w, s->hwc_h);
-            c->hot_x = 0;               /* X/Y are the image's top-left */
-            c->hot_y = 0;
-            memcpy(c->data, s->hwc_pix, s->hwc_w * s->hwc_h * 4);
-            dpy_cursor_define(s->con, c);
-            cursor_unref(c);
-        }
+        ppc_mac_gpu_hwc_define(s);
         break;
     case 0x0C:
         s->hwc_x = (int32_t)val;
@@ -9783,9 +9803,12 @@ static void ppc_mac_gpu_hwc_write(PPCMacGPUState *s, uint32_t reg, uint32_t val)
         break;
     case 0x14:
         s->hwc_visible = val & 1;
-        if (s->con) {
-            dpy_mouse_set(s->con, s->hwc_x, s->hwc_y, s->hwc_visible);
-        }
+        ppc_mac_gpu_hwc_move(s);
+        break;
+    case 0x1C:
+        /* hotspot x | y << 16, sent before COMMIT by newer NDRVs */
+        s->hwc_hot_x = val & 0xFFFF;
+        s->hwc_hot_y = val >> 16;
         break;
     }
 }
@@ -9798,6 +9821,7 @@ static uint32_t ppc_mac_gpu_hwc_read(PPCMacGPUState *s, uint32_t reg)
     case 0x10: return s->hwc_y;
     case 0x14: return s->hwc_visible;
     case 0x18: return PPC_MAC_GPU_HWC_MAGIC;
+    case 0x1C: return s->hwc_hot_x | s->hwc_hot_y << 16;
     }
     return 0;
 }
@@ -12248,6 +12272,7 @@ static void ppc_mac_gpu_reset(DeviceState *dev)
     cp.epoch++;                 /* a CP thread mid-ring drops what it has */
     memset(&s->regs, 0, sizeof(s->regs));
     s->hwc_w = s->hwc_h = s->hwc_idx = 0;
+    s->hwc_hot_x = s->hwc_hot_y = 0;
     s->regs.regs_3d[R200_3D_IDX(0x3230)] = 0xFFFFFFFFu;  /* DEPTHCLEARVALUE */
     s->hwc_visible = false;
     if (s->con) {

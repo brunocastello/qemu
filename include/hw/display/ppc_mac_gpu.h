@@ -846,6 +846,8 @@ struct PPCMacGPUState {
     uint32_t hwc_w, hwc_h, hwc_idx;
     bool host_aspect_modes;       /* EDID offers the patched NDRV's 1.545 modes */
     int32_t hwc_x, hwc_y;
+    /* hotspot inside the image, from HWC reg 0x1C (0,0 with older NDRVs) */
+    uint32_t hwc_hot_x, hwc_hot_y;
     bool hwc_visible;
     /* A woken machine's window has never been told what the pointer looks
      * like: the guest uploaded it once, before the machine slept, and will
