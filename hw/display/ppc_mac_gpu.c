@@ -12662,14 +12662,7 @@ static void ppc_mac_gpu_realize(PCIDevice *dev, Error **errp)
          *          1024x768@60, 1024x768@70, 1024x768@75, 1280x1024@75
          * Byte 37: 1152x870@75, (rest reserved)
          */
-        /*
-         * The 9700 driver lays the screen out at a pitch rounded up to 64
-         * pixels while the QEMU VGA NDRV reports width * 4 bytes per row;
-         * the two only agree for widths that are multiples of 64, so the
-         * R300 card does not offer 800x600 (832 vs 800 pixels: windows
-         * scramble while they are dragged).
-         */
-        e[35] = s->r300 ? 0x20 : 0x21; /* 640x480@60 (+ 800x600@60) */
+        e[35] = 0x21; /* 640x480@60, 800x600@60 */
         e[36] = 0x09; /* 1024x768@60 + 1280x1024@75 */
         e[37] = 0x80; /* 1152x870@75 */
 
