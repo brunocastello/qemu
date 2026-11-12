@@ -10,7 +10,7 @@ through ppc-mac-gpu registers at MMIO BAR + 0xFF00.
   0xFF14 SHOW    bit 0 = visible (applies X/Y)
   0xFF18 ID      reads 'HWC1' when the device supports this
   0xFF1C HOT     hotspot x | y << 16 inside the image, written before COMMIT
-                 (from IOHardwareCursorInfo.cursorHotSpotX/Y; added for UTM)
+                 (IOHardwareCursorInfo.cursorHotSpotX/Y, else 4,4; added for UTM)
 
 All registers are little-endian (stwbrx/lwbrx), like the rest of the BAR.
 """
@@ -227,8 +227,15 @@ def build(src, dst):
     a(lwzu(0, 4, 9), stwbrx(0, 8, 11))
     a.br('bdnz', 'set_loop')
     a.label('set_commit')
-    a(addi(5, 2, INFO), lhz(10, 20, 5), lhz(12, 22, 5))  # cursorHotSpotX/Y
-    a(slwi(12, 12, 16), or_(10, 10, 12), li(11, 0x1C), stwbrx(10, 8, 11))
+    # Hotspot: cursorHotSpotX/Y if VSL filled them in. Tiger's IOFramebuffer
+    # (IOGraphics-179 convertCursorImage) leaves them 0 and instead shifts the
+    # image so the hotspot sits at (4,4) whenever it fits, so 0,0 means (4,4).
+    a(addi(5, 2, INFO), lhz(10, 20, 5), lhz(12, 22, 5))
+    a(slwi(12, 12, 16), or_(10, 10, 12), cmplwi(10, 0))
+    a.br('bne', 'set_hot')
+    a(addis(10, 0, 4), ori(10, 10, 4))
+    a.label('set_hot')
+    a(li(11, 0x1C), stwbrx(10, 8, 11))
     a(li(11, 8), stwbrx(11, 8, 11), SYNC)
     a(addi(9, 2, STATE), li(0, 1), stw(0, 12, 9), li(3, 0))
     a.br('b', 'set_out')

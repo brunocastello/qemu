@@ -8,8 +8,11 @@ list in hw/display/ppc_mac_gpu.c.
 
 Origin: firmware/src/ndrv of https://github.com/linuxkid473/ppc-osx-vgpu
 (GPL-2.0). Local change: the SetHardwareCursor routine also sends the cursor
-hotspot (IOHardwareCursorInfo.cursorHotSpotX/Y) through register 0x1C, so the
-host can put the pointer on the cursor's tip instead of the image's corner.
+hotspot through register 0x1C, so the host can put the pointer on the cursor's
+tip instead of the image's corner. It sends IOHardwareCursorInfo.cursorHotSpotX/Y
+when VSLPrepareCursorForHardwareCursor fills them in, else (4,4): Tiger's
+IOFramebuffer leaves them 0 and shifts each image so its hotspot lands on (4,4)
+whenever it fits (IOGraphics-179, IOFramebuffer::convertCursorImage).
 
 Rebuild (plain Python 3, no other dependencies):
 
