@@ -9196,6 +9196,81 @@ static struct {
 } g_r300_tcache[R300_TCACHE];
 static uint64_t g_r300_tcache_clock;
 
+/*
+ * DEBUG (r300-mipcheck, $R300_MIPCHECK): for a mipmapped 16-bit texture,
+ * compare every level with a box-filtered level 0 under four readings of
+ * the bytes - as decoded (BE halfwords), byte-swapped halfwords, texel
+ * pairs swapped, both - and log the mean RGB error of each.  The reading
+ * with the smallest error says how the level really lies in VRAM.
+ */
+static void mipcheck_rgb(uint32_t fmt, uint16_t v, int c[3])
+{
+    switch (fmt) {
+    case 0x6: c[0] = (v >> 11) * 255 / 31; c[1] = ((v >> 5) & 63) * 255 / 63; c[2] = (v & 31) * 255 / 31; break;
+    case 0xA: c[0] = ((v >> 8) & 15) * 17; c[1] = ((v >> 4) & 15) * 17; c[2] = (v & 15) * 17; break;
+    case 0xB: c[0] = ((v >> 10) & 31) * 255 / 31; c[1] = ((v >> 5) & 31) * 255 / 31; c[2] = (v & 31) * 255 / 31; break;
+    default:  c[0] = c[1] = c[2] = v >> 8; break;
+    }
+}
+
+static uint16_t mipcheck_texel(const R300TexDesc *td, const uint8_t *src, uint32_t l,
+                               uint32_t x, uint32_t y, uint32_t w, int variant)
+{
+    if (variant & 2) {
+        x = (x ^ 1) < w ? x ^ 1 : x;
+    }
+    const uint8_t *p = src + td->lvl_off[l] + (size_t)y * td->lvl_pitch[l] + (size_t)x * 2;
+    return variant & 1 ? (uint16_t)(p[0] | p[1] << 8) : (uint16_t)(p[0] << 8 | p[1]);
+}
+
+static void r300_mipcheck(const R300TexDesc *td, const uint8_t *src)
+{
+    static int init, n;
+    static bool on;
+    if (!init) {
+        init = 1;
+        on = getenv("R300_MIPCHECK") != NULL;
+    }
+    if (!on || n >= 300 || td->kind != R300_TEXK_CONVERT16 || td->levels < 2 ||
+        td->dim != R300_TEXDIM_2D || td->width < 8 || td->height < 8) {
+        return;
+    }
+    n++;
+    char line[1024];
+    int len = snprintf(line, sizeof(line), "mipcheck tex: addr %08x fmt %x %ux%u levels %u endian %u%s:",
+                       td->gpu_addr, td->format, td->width, td->height, td->levels,
+                       td->endian, td->host_data ? " GART" : "");
+    for (uint32_t l = 1; l < td->levels && len < (int)sizeof(line) - 80; l++) {
+        uint32_t w = MAX(td->width >> l, 1u), h = MAX(td->height >> l, 1u);
+        uint32_t fx = td->width / w, fy = td->height / h;
+        double err[4] = { 0, 0, 0, 0 };
+        for (uint32_t y = 0; y < h; y++) {
+            for (uint32_t x = 0; x < w; x++) {
+                int ref[3] = { 0, 0, 0 }, c[3];
+                for (uint32_t j = 0; j < fy; j++) {
+                    for (uint32_t i = 0; i < fx; i++) {
+                        mipcheck_rgb(td->format, mipcheck_texel(td, src, 0, x * fx + i,
+                                                                y * fy + j, td->width, 0), c);
+                        ref[0] += c[0]; ref[1] += c[1]; ref[2] += c[2];
+                    }
+                }
+                for (int k = 0; k < 3; k++) {
+                    ref[k] /= (int)(fx * fy);
+                }
+                for (int v = 0; v < 4; v++) {
+                    mipcheck_rgb(td->format, mipcheck_texel(td, src, l, x, y, w, v), c);
+                    err[v] += abs(c[0] - ref[0]) + abs(c[1] - ref[1]) + abs(c[2] - ref[2]);
+                }
+            }
+        }
+        len += snprintf(line + len, sizeof(line) - len, " L%u(%ux%u @%x p%u)=%.0f/%.0f/%.0f/%.0f",
+                        l, w, h, td->lvl_off[l], td->lvl_pitch[l],
+                        err[0] / (3.0 * w * h), err[1] / (3.0 * w * h),
+                        err[2] / (3.0 * w * h), err[3] / (3.0 * w * h));
+    }
+    qemu_log("%s\n", line);
+}
+
 static id<MTLTexture> r300_texture_full(PPCMacGPUMetalState *st, id<MTLDevice> dev,
                                         uint8_t *vram_ptr, const R300TexDesc *td)
 {
@@ -9236,6 +9311,7 @@ static id<MTLTexture> r300_texture_full(PPCMacGPUMetalState *st, id<MTLDevice> d
         }
     }
 
+    r300_mipcheck(td, src);
     MTLTextureDescriptor *d = [[MTLTextureDescriptor alloc] init];
     d.textureType = td->dim == R300_TEXDIM_3D ? MTLTextureType3D :
                     td->dim == R300_TEXDIM_CUBE ? MTLTextureTypeCube : MTLTextureType2D;
