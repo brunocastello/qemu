@@ -50,6 +50,7 @@
 #define TX_BORDER_COLOR_0           0x45C0
 #define US_OUT_FMT_0                0x46A4
 #define FG_FOG_BLEND                0x4BC0
+#define VAP_OUTPUT_VTX_FMT_0_DBG    0x2090
 #define FG_FOG_FACTOR               0x4BC4
 #define FG_FOG_COLOR_R              0x4BC8  /* then G, B */
 #define FG_ALPHA_FUNC               0x4BD4
@@ -1320,6 +1321,30 @@ static const GpuVs *gpu_vs_get(const R300State *st, const R300PVSProgram *prog,
     key_push(&key, &klen, &kcap, prog->max_const);
     key_push(&key, &klen, &kcap, prog->fc_opc);
     key_push(&key, &klen, &kcap, persp | fog << 1 | fogsel << 2 | clip << 8);
+    if (fog && getenv("R300_FOGLOG")) {
+        /* DEBUG (r300-mipcheck): each distinct fog routing, once */
+        static uint32_t seen[128];
+        static int nseen;
+        uint32_t cm = (lay->color[0] >= 0) | (lay->color[1] >= 0) << 1 |
+                      (lay->color[2] >= 0) << 2 | (lay->color[3] >= 0) << 3;
+        uint32_t k = (r300_reg(st, FG_FOG_BLEND) & 7) | fogsel << 3 | cm << 6 |
+                     (r300_reg(st, VAP_OUTPUT_VTX_FMT_0_DBG) & 0xFFFF) << 10;
+        bool dup = false;
+        for (int i = 0; i < nseen; i++) {
+            dup |= seen[i] == k;
+        }
+        if (!dup && nseen < 128) {
+            seen[nseen++] = k;
+            fprintf(stderr, "foglog: blend %x fogsel %u colors %x pos %d psize %d "
+                    "outfmt0 %08x outfmt1 %08x scale %g offset %g color %03x/%03x/%03x factor %03x\n",
+                    r300_reg(st, FG_FOG_BLEND), fogsel, cm, lay->pos, lay->psize,
+                    r300_reg(st, VAP_OUTPUT_VTX_FMT_0_DBG), r300_reg(st, VAP_OUTPUT_VTX_FMT_0_DBG + 4),
+                    bits_to_float(r300_reg(st, GA_FOG_SCALE)),
+                    bits_to_float(r300_reg(st, GA_FOG_OFFSET)),
+                    r300_reg(st, FG_FOG_COLOR_R) & 0x3FF, r300_reg(st, FG_FOG_COLOR_R + 4) & 0x3FF,
+                    r300_reg(st, FG_FOG_COLOR_R + 8) & 0x3FF, r300_reg(st, FG_FOG_FACTOR) & 0x3FF);
+        }
+    }
     for (unsigned k = prog->first_inst * 4; k < (prog->last_inst + 1) * 4; k++) {
         key_push(&key, &klen, &kcap, prog->code[k]);
     }

@@ -12684,7 +12684,7 @@ static void ppc_mac_gpu_realize(PCIDevice *dev, Error **errp)
          * R300 card does not offer 800x600 (832 vs 800 pixels: windows
          * scramble while they are dragged).
          */
-        e[35] = s->r300 ? 0x20 : 0x21; /* 640x480@60 (+ 800x600@60) */
+        e[35] = s->r300 && !getenv("PPCGPU_EDID_800") ? 0x20 : 0x21; /* 640x480@60 (+ 800x600@60); DEBUG env */
         e[36] = 0x09; /* 1024x768@60 + 1280x1024@75 */
         e[37] = 0x80; /* 1152x870@75 */
 
