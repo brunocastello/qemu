@@ -549,9 +549,14 @@ void r300_tex_level_dims(const R300TexDesc *td, uint32_t l, uint32_t *w,
     }
 }
 
-/* The hardware's addressing, as Mesa's r300_texture_desc.c lays out
- * linear (untiled) textures: 32-byte rows, power-of-two heights for
- * mipmapped, 3D and cube textures, levels one after another. */
+/* The hardware's addressing of linear (untiled) textures: levels one
+ * after another, power-of-two heights for mipmapped, 3D and cube
+ * textures.  Level 0 rows are 32-byte aligned as in Mesa's
+ * r300_texture_desc.c; the levels below it are 16-byte aligned.  Tiger's
+ * driver puts them there (a 64x64 RGB565 chain: 8x8 at +0x2a00, 4x4 at
+ * +0x2a80, 2x2 at +0x2ac0, all with 16-byte rows; RGBA8 4x4 and smaller
+ * the same), and with 32-byte rows every level under 16 bytes wide read
+ * other texels: GLQuake's distant floors came out pink and green. */
 void r300_tex_layout(R300TexDesc *td, uint32_t bpp, bool dxt, bool pitch_en)
 {
     bool pot_rows = td->levels > 1 || td->dim != R300_TEXDIM_2D;
@@ -568,7 +573,7 @@ void r300_tex_layout(R300TexDesc *td, uint32_t bpp, bool dxt, bool pitch_en)
             pitch = (((w + 3) / 4) * bpp + 31) & ~31u;
             rows = (h + 3) / 4;
         } else {
-            pitch = (w * bpp + 31) & ~31u;
+            pitch = l == 0 ? (w * bpp + 31) & ~31u : (w * bpp + 15) & ~15u;
             rows = h;
         }
         if (l == 0 && pitch_en) {
