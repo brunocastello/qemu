@@ -386,8 +386,10 @@ static void us_emit_alu(R300Sb *sb, const R300State *st, unsigned i)
     char s[3][64], e[3][96], sel[96], m[4];
     unsigned rop = (ri >> 23) & 0xF, aop = (ai >> 23) & 0xF;
 
-    r300_sb_printf(sb, "    { // alu %u: rgb %08x/%08x alpha %08x/%08x\n",
-                   i, ra, ri, aa, ai);
+    /* No instruction index: the text must not depend on where the
+     * program sits in instruction memory (see r300_us_to_glsl). */
+    r300_sb_printf(sb, "    { // alu: rgb %08x/%08x alpha %08x/%08x\n",
+                   ra, ri, aa, ai);
     for (int k = 0; k < 3; k++) {
         us_addr_expr(s[k], sizeof(s[k]), (ra >> (6 * k)) & 0x3F);
         r300_sb_printf(sb, "        vec4 cs%d = %s;", k, s[k]);
@@ -1388,8 +1390,15 @@ char *r300_us_to_glsl(const R300State *st, const R300FSDesc *desc,
             r300_sb_free(&body);
             return NULL;
         }
-        r300_sb_printf(&body, "    // node %u: tex %u+%u alu %u+%u\n", i,
-                       nd->tex_start, nd->tex_count, nd->alu_start, nd->alu_count);
+        /*
+         * Counts only, no instruction addresses: the renderers key their
+         * shader and pipeline caches on this text, and the driver loads
+         * the same program at different places in instruction memory.
+         * With the addresses in, UT2004 converted one shader hundreds of
+         * times (~7 ms each, a stutter on every new combination).
+         */
+        r300_sb_printf(&body, "    // node %u: %u tex, %u alu\n", i,
+                       nd->tex_count, nd->alu_count);
         for (unsigned k = 0; k < nd->tex_count; k++) {
             if (!us_emit_tex(&body, st, r300_reg(st, US_TEX_INST_0 +
                                                  4 * (nd->tex_start + k)),
