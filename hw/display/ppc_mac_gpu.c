@@ -4488,15 +4488,31 @@ static void gart_blit_rows(PPCMacGPUState *s, AddressSpace *as, bool gart,
                            uint32_t w, uint32_t h, uint32_t bpp)
 {
     size_t row_bytes = (size_t)w * bpp;
+    /*
+     * 8-bit texels: VRAM holds aperture 0's 32-bit-swapped view of the
+     * card's bytes (see r300_ap_swap), and the DMA engine stores the
+     * source bytes through SRC swap.  So each byte lands in another lane
+     * of its dword: reversed for no swap (QuartzGL's glyph atlases),
+     * where it lies for a 32-bit swap.  Rows go through a scratch copy so
+     * the bytes of a partly covered dword outside the rect keep theirs.
+     */
+    unsigned lane_xor = 0;
+    bool narrow = s->r300 && bpp == 1 && s->r300_src_swap != 2;
+    uint8_t *tmp = NULL;
+    if (narrow) {
+        static const unsigned x[4] = { 3, 2, 0, 1 };   /* by SRC swap mode */
+        lane_xor = x[s->r300_src_swap & 3];
+        tmp = g_malloc(row_bytes);
+    }
 
     for (uint32_t row = 0; row < h; row++) {
         uint32_t gpu = src_offset + (src_y + row) * src_pitch + src_x * bpp;
         uint64_t d = (uint64_t)dst_offset + (uint64_t)(dst_y + row) * dst_pitch +
                      (uint64_t)dst_x * bpp;
-        if (d + row_bytes > s->vram_size) {
+        if (d + row_bytes > s->vram_size || (narrow && ((d + row_bytes + 3) & ~3ull) > s->vram_size)) {
             continue;
         }
-        uint8_t *out = vram + d;
+        uint8_t *out = narrow ? tmp : vram + d;
 
         for (size_t done = 0; done < row_bytes;) {
             hwaddr phys;
@@ -4511,7 +4527,11 @@ static void gart_blit_rows(PPCMacGPUState *s, AddressSpace *as, bool gart,
             done += n;
         }
 
-        if (s->r300 && bpp == 4 && s->r300_src_swap != 2) {
+        if (narrow) {
+            for (size_t i = 0; i < row_bytes; i++) {
+                vram[(d + i) ^ lane_xor] = tmp[i];
+            }
+        } else if (s->r300 && bpp == 4 && s->r300_src_swap != 2) {
             for (size_t i = 0; i + 4 <= row_bytes; i += 4) {
                 uint32_t px = ldl_he_p(out + i);
                 stl_he_p(out + i, bswap32(r300_swap_mode(px, s->r300_src_swap)));
@@ -4522,6 +4542,7 @@ static void gart_blit_rows(PPCMacGPUState *s, AddressSpace *as, bool gart,
             }
         }
     }
+    g_free(tmp);
 }
 
 static inline void mc_vram_write32(PPCMacGPUState *s, uint8_t *vram,
