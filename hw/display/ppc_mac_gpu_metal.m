@@ -9427,6 +9427,7 @@ static struct {
     MTLScissorRect rect;
 } g_r300_ec;
 static uint64_t g_r300_ec_set, g_r300_ec_skipped;   /* encoder calls made / saved */
+static uint64_t g_r300_stat_selfcopy;               /* textures copied off their own target */
 
 static void r300_ec_reset(void)
 {
@@ -9607,6 +9608,56 @@ static int r300_draw_encode(PPCMacGPUMetalState *st, uint8_t *vram_ptr,
         if (!g_r200_cb) {
             g_r200_cb = r200_new_cb(st);
         }
+        /*
+         * A draw that samples its own colour buffer: Leopard's QuartzGL
+         * scrolls a window by drawing the backing surface onto itself,
+         * shifted.  On a tiled GPU the pass's tiles land in memory while
+         * later tiles still read it through the texture view, so the shift
+         * repeats rows already moved (stripes of copies).  Sample a copy
+         * taken before the pass instead, ordered by a fence.
+         */
+        id<MTLFence> self_fence = nil;
+        for (int t = 0; t < R300_NUM_TEX_UNITS; t++) {
+            id<MTLTexture> x = tex[t];
+            if (!u.tex_info[t][0] || pkt->tex[t].host_data || !x.buffer ||
+                x.textureType != MTLTextureType2D || x.mipmapLevelCount != 1) {
+                continue;
+            }
+            uint64_t tlo = pkt->tex[t].gpu_addr;
+            uint64_t thi = tlo + pkt->tex[t].size_bytes;
+            bool hit = false;
+            for (uint32_t k = 0; k < ncb && !hit; k++) {
+                uint64_t lo = ck[k].offset, hi = lo + (uint64_t)ck[k].pitch * ck[k].height;
+                hit = tlo < hi && lo < thi;
+            }
+            if (!hit) {
+                continue;
+            }
+            MTLTextureDescriptor *td = [MTLTextureDescriptor
+                texture2DDescriptorWithPixelFormat:x.pixelFormat
+                                             width:x.width height:x.height
+                                         mipmapped:NO];
+            td.storageMode = MTLStorageModePrivate;
+            td.usage = MTLTextureUsageShaderRead;
+            id<MTLTexture> copy = [[dev newTextureWithDescriptor:td] autorelease];
+            if (!copy) {
+                continue;
+            }
+            if (g_r200_enc) {
+                [g_r200_enc endEncoding];
+                [g_r200_enc release];
+                g_r200_enc = nil;
+            }
+            if (!self_fence) {
+                self_fence = [[dev newFence] autorelease];
+            }
+            id<MTLBlitCommandEncoder> b = [g_r200_cb blitCommandEncoder];
+            [b copyFromTexture:x toTexture:copy];
+            [b updateFence:self_fence];
+            [b endEncoding];
+            tex[t] = copy;
+            g_r300_stat_selfcopy++;
+        }
         /* A pass is keyed by its colour buffers and, when it has one, its
          * depth buffer.  Depth-less draws may run in a pass with depth
          * (test and write off); depth draws need their own buffer bound. */
@@ -9684,6 +9735,9 @@ static int r300_draw_encode(PPCMacGPUMetalState *st, uint8_t *vram_ptr,
             return -1;
         }
         id<MTLRenderCommandEncoder> enc = g_r200_enc;
+        if (self_fence) {
+            [enc waitForFence:self_fence beforeStages:MTLRenderStageFragment];
+        }
         if (pipe != g_r300_ec.pipe) {
             [enc setRenderPipelineState:pipe];
             g_r300_ec.pipe = pipe;
@@ -9838,11 +9892,13 @@ static int r300_draw_encode(PPCMacGPUMetalState *st, uint8_t *vram_ptr,
         g_r200_stat_draws++;
         if (g_r200_stat_draws % 2000 == 0) {
             qemu_log("ppc-mac-gpu r300: %llu draws, %llu passes, encoder calls "
-                     "%llu made / %llu skipped as already bound\n",
+                     "%llu made / %llu skipped as already bound, "
+                     "%llu self-sampling copies\n",
                      (unsigned long long)g_r200_stat_draws,
                      (unsigned long long)g_r200_stat_passes,
                      (unsigned long long)g_r300_ec_set,
-                     (unsigned long long)g_r300_ec_skipped);
+                     (unsigned long long)g_r300_ec_skipped,
+                     (unsigned long long)g_r300_stat_selfcopy);
         }
         for (int t = 0; t < R300_NUM_TEX_UNITS; t++) {
             if (u.tex_info[t][0] && !pkt->tex[t].host_data) {
