@@ -9554,6 +9554,22 @@ static int r300_draw_encode(PPCMacGPUMetalState *st, uint8_t *vram_ptr,
                 seen[pkt->glsl_id / 8] |= 1 << (pkt->glsl_id % 8);
                 qemu_log("R3FS %u\n%s\nR3FS end\n", pkt->glsl_id, pkt->glsl);
             }
+            {
+                static uint8_t vseen[65536 / 8];
+                if (pkt->vs_glsl && pkt->vs_id < 65536 &&
+                    !(vseen[pkt->vs_id / 8] & (1 << (pkt->vs_id % 8)))) {
+                    vseen[pkt->vs_id / 8] |= 1 << (pkt->vs_id % 8);
+                    qemu_log("R3VS %u\n%s\nR3VS end\n", pkt->vs_id, pkt->vs_glsl);
+                }
+                if (pkt->vs_u && pkt->num_verts <= 6) {
+                    qemu_log("R3VC");
+                    for (int c = 0; c < 12; c++) {
+                        qemu_log(" c%d=(%.3f,%.3f,%.3f,%.3f)", c, pkt->vs_u->c[c][0],
+                                 pkt->vs_u->c[c][1], pkt->vs_u->c[c][2], pkt->vs_u->c[c][3]);
+                    }
+                    qemu_log("\n");
+                }
+            }
         }
     }
     uint32_t ncb = MAX(pkt->num_cb, 1u);
