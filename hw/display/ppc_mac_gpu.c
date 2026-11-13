@@ -3100,6 +3100,13 @@ static void r300_aa_resolve(PPCMacGPUState *s, const R300DrawPacket *pkt)
 #define R300_E0_RANGES 16
 static struct { uint32_t base, size; } r300_e0[R300_E0_RANGES];
 
+static float r300_mbf(uint32_t u)
+{
+    float f;
+    memcpy(&f, &u, 4);
+    return f;
+}
+
 static void r300_e0_note(uint32_t base, uint32_t size, bool e0)
 {
     int free_slot = -1;
@@ -3523,6 +3530,16 @@ static void r300_render(PPCMacGPUState *s, uint32_t opcode, const uint32_t *d,
                     for (uint32_t v = 0; pkt.vs_in && v < pkt.vs_in_vecs && v < 48; v++) {
                         fprintf(mbl, "  in%02u %g %g %g %g\n", v, pkt.vs_in[v][0],
                                 pkt.vs_in[v][1], pkt.vs_in[v][2], pkt.vs_in[v][3]);
+                    }
+                    fprintf(mbl, "  vport xs %g xo %g ys %g yo %g vte %08x rtw %u\n",
+                            r300_mbf(r300_reg(s->r3, 0x1D98)), r300_mbf(r300_reg(s->r3, 0x1D9C)),
+                            r300_mbf(r300_reg(s->r3, 0x1DA0)), r300_mbf(r300_reg(s->r3, 0x1DA4)),
+                            r300_reg(s->r3, 0x20B0), pkt.rt_width);
+                    for (uint32_t v = 0; pkt.verts && v < pkt.num_verts && v < 12; v++) {
+                        fprintf(mbl, "  v%u pos %g %g %g %g  t0 %g %g %g %g\n", v,
+                                pkt.verts[v].pos[0], pkt.verts[v].pos[1], pkt.verts[v].pos[2],
+                                pkt.verts[v].pos[3], pkt.verts[v].v[0][0], pkt.verts[v].v[0][1],
+                                pkt.verts[v].v[0][2], pkt.verts[v].v[0][3]);
                     }
                     for (uint32_t v = 0; pkt.vs_idx && v < pkt.num_verts && v < 12; v++) {
                         fprintf(mbl, "  idx %u\n", pkt.vs_idx[v]);
