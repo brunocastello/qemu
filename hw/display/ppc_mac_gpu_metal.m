@@ -9488,6 +9488,45 @@ static int r300_draw_encode(PPCMacGPUMetalState *st, uint8_t *vram_ptr,
         return -1;
     }
     id<MTLDevice> dev = st->vramBuffer.device;
+    {   /* DEBUG r300-qgldbg6: R300_DRAWLOG=1 one line per draw, FS text once per id */
+        static int dl = -1;
+        static uint8_t seen[65536 / 8];
+        if (dl < 0) {
+            dl = getenv("R300_DRAWLOG") != NULL;
+        }
+        if (dl) {
+            const R300FSUniforms *U = &pkt->uniforms;
+            const float *c0 = pkt->verts ? pkt->verts[0].v[0] : NULL;
+            qemu_log("R3DRAW t=%lld rt=%x/%u %ux%u f=%u v=%u sc=%u,%u-%u,%u n=%u vs=%u fs=%u "
+                     "cb=%x ab=%x cm=%x af=%x os=%u%u%u%u sw=%u en=%u rop=%x "
+                     "c0=(%.3f,%.3f,%.3f,%.3f) k0=(%.3f,%.3f,%.3f,%.3f)",
+                     (long long)(g_get_monotonic_time() / 1000), pkt->rt_gpu_addr,
+                     pkt->rt_pitch, pkt->rt_width, pkt->rt_height, pkt->rt_format,
+                     pkt->rt_view, pkt->scissor[0], pkt->scissor[1], pkt->scissor[2],
+                     pkt->scissor[3], pkt->num_verts, pkt->vs_id, pkt->glsl_id,
+                     U->cblend, U->ablend, U->chanmask, U->alpha_func,
+                     U->out_sel[0], U->out_sel[1], U->out_sel[2], U->out_sel[3],
+                     U->rt_swap32, U->rt_endian, U->rop,
+                     c0 ? c0[0] : -1, c0 ? c0[1] : -1, c0 ? c0[2] : -1, c0 ? c0[3] : -1,
+                     U->consts[0][0], U->consts[0][1], U->consts[0][2], U->consts[0][3]);
+            for (int t = 0; t < R300_NUM_TEX_UNITS; t++) {
+                const R300TexDesc *td = &pkt->tex[t];
+                if (td->bound) {
+                    qemu_log(" T%d=%x:%ux%u f%x k%u e%u p%u l%u d%u h%u swz%u%u%u%u",
+                             t, td->gpu_addr, td->width, td->height, td->format,
+                             td->kind, td->endian, td->pitch_bytes, td->levels,
+                             td->dim, td->host_data != NULL, U->tex_swz[t][0], U->tex_swz[t][1],
+                             U->tex_swz[t][2], U->tex_swz[t][3]);
+                }
+            }
+            qemu_log("\n");
+            if (pkt->glsl && pkt->glsl_id < 65536 &&
+                !(seen[pkt->glsl_id / 8] & (1 << (pkt->glsl_id % 8)))) {
+                seen[pkt->glsl_id / 8] |= 1 << (pkt->glsl_id % 8);
+                qemu_log("R3FS %u\n%s\nR3FS end\n", pkt->glsl_id, pkt->glsl);
+            }
+        }
+    }
     uint32_t ncb = MAX(pkt->num_cb, 1u);
     MTLPixelFormat cpf[R300_US_MAX_TARGETS];
     R200TexKey ck[R300_US_MAX_TARGETS];
