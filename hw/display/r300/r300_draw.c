@@ -7,6 +7,7 @@
 #include "r300_draw.h"
 
 #include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -733,6 +734,26 @@ static void set_textures(const R300State *st, R300DrawPacket *pkt)
         r300_tex_layout(t, bpp, dxt, f0 >> 31);
         t->pitch_bytes = t->lvl_pitch[0];
         t->format = fmt;
+        if (getenv("R300_TEXLOG")) {
+            /* DEBUG (r300-qgldbg): each distinct texture set-up, once */
+            static uint32_t seen[512][4];
+            static int nseen;
+            uint32_t k4[4] = { f0, f1 & ~0u, f2, off & 0x1F };
+            bool dup = false;
+            for (int i = 0; i < nseen && !dup; i++) {
+                dup = !memcmp(seen[i], k4, sizeof(k4));
+            }
+            if (!dup && nseen < 512) {
+                memcpy(seen[nseen++], k4, sizeof(k4));
+                fprintf(stderr, "texlog: unit %u addr %08x fmt %x %ux%u levels %u dim %u "
+                        "pitch_en %u f2 %08x pitch %u lvl1 @%x p%u endian %u kind %d "
+                        "f0 %08x f1 %08x filt0 %08x\n",
+                        k, t->gpu_addr, fmt, t->width, t->height, t->levels, t->dim,
+                        f0 >> 31, f2, t->pitch_bytes, t->lvl_off[1], t->lvl_pitch[1],
+                        t->endian, (int)t->kind, f0, f1,
+                        r300_reg(st, TX_FILTER0_0 + 4 * k));
+            }
+        }
         t->filter0 = r300_reg(st, TX_FILTER0_0 + 4 * k);
         t->filter1 = r300_reg(st, TX_FILTER1_0 + 4 * k);
         u->tex_info[k][0] = 1;
