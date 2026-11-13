@@ -2079,6 +2079,32 @@ uint64_t r300_hash_tex(const uint8_t *p, size_t n)
     return h ^ n;
 }
 
+/*
+ * Texels as the card reads them: little-endian words.  VRAM holds the
+ * big-endian CPU's view (GART copies the other side of the aperture),
+ * and the card's dword is the TX_OFFSET endian swap of that, as
+ * r300_texel does for shader-decoded formats: with no swap, every word
+ * is byte-reversed.  n is a multiple of 4.
+ */
+static void r300_tex_card_words(const R300TexDesc *td, uint8_t *p, size_t n)
+{
+    for (size_t i = 0; i < n; i += 4) {
+        uint32_t l, v;
+        memcpy(&l, p + i, 4);
+        if (td->host_data) {
+            l = __builtin_bswap32(l);
+        }
+        v = __builtin_bswap32(l);                       /* the BE value */
+        switch (td->endian & 3) {
+        case 1: v = ((v & 0x00ff00ffu) << 8) | ((v >> 8) & 0x00ff00ffu); break;
+        case 2: v = __builtin_bswap32(v); break;
+        case 3: v = (v << 16) | (v >> 16); break;
+        default: break;
+        }
+        memcpy(p + i, &v, 4);
+    }
+}
+
 uint8_t *r300_tex_level_bytes(const R300TexDesc *td, const uint8_t *src,
                                  uint32_t l, uint32_t w, uint32_t h,
                                  uint32_t *bpr)
@@ -2108,33 +2134,34 @@ uint8_t *r300_tex_level_bytes(const R300TexDesc *td, const uint8_t *src,
         for (uint32_t y = 0; y < bh; y++) {
             memcpy(out + (size_t)y * bw * bs, src + (uint64_t)y * pitch, (size_t)bw * bs);
         }
-        /*
-         * Blocks are little-endian words to the card.  VRAM holds the
-         * big-endian CPU's view (GART copies the other side of the
-         * aperture), and the card's dword is the TX_OFFSET endian swap of
-         * that, as r300_texel does for shader-decoded formats: with no
-         * swap, every word is byte-reversed.  (Doom 3 on Tiger: untouched
-         * blocks decode to coloured speckle, reversed ones to the art.)
-         */
-        for (size_t i = 0; i < (size_t)bw * bh * bs; i += 4) {
-            uint32_t l, v;
-            memcpy(&l, out + i, 4);
-            if (td->host_data) {
-                l = __builtin_bswap32(l);
-            }
-            v = __builtin_bswap32(l);                       /* the BE value */
-            switch (td->endian & 3) {
-            case 1: v = ((v & 0x00ff00ffu) << 8) | ((v >> 8) & 0x00ff00ffu); break;
-            case 2: v = __builtin_bswap32(v); break;
-            case 3: v = (v << 16) | (v >> 16); break;
-            default: break;
-            }
-            memcpy(out + i, &v, 4);
-        }
+        /* (Doom 3 on Tiger: untouched blocks decode to coloured
+         * speckle, reversed ones to the art.) */
+        r300_tex_card_words(td, out, (size_t)bw * bh * bs);
         return out;
     }
-    default: {                          /* RGBA8, R8, RG8: bytes as they lie */
-        uint32_t bpp = td->kind == R300_TEXK_RGBA8 ? 4 : td->kind == R300_TEXK_RG8 ? 2 : 1;
+    case R300_TEXK_R8: {
+        /*
+         * One byte a texel, in the card's word order: each source row
+         * (pitch 16-byte aligned) as whole words, then its w texels.
+         * QuartzGL's glyph masks are X8 with no swap in VRAM; read as
+         * they lie, every four texels came out mirrored (Leopard's
+         * System Preferences, which enables QuartzGL, drew garbled text).
+         */
+        uint32_t wb = (w + 3) & ~3u;
+        uint8_t *row = calloc(1, wb);
+        *bpr = w;
+        out = malloc((size_t)w * h);
+        for (uint32_t y = 0; y < h; y++) {
+            /* an explicit pitch (TX_PITCH_EN) need not be whole words */
+            memcpy(row, src + (uint64_t)y * pitch, wb < pitch ? wb : pitch);
+            r300_tex_card_words(td, row, wb);
+            memcpy(out + (size_t)y * w, row, w);
+        }
+        free(row);
+        return out;
+    }
+    default: {                          /* RGBA8, RG8: bytes as they lie */
+        uint32_t bpp = td->kind == R300_TEXK_RGBA8 ? 4 : 2;
         *bpr = w * bpp;
         out = malloc((size_t)w * h * bpp);
         for (uint32_t y = 0; y < h; y++) {
