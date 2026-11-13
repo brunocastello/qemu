@@ -599,6 +599,17 @@ enum { R200_WHY_2D = 0x40 };
 static void r200_vram_access(PPCMacGPUState *s, uint64_t lo, uint64_t hi,
                              bool write_access, uint32_t tag)
 {
+    {   /* DEBUG r300-qgldbg7 */
+        static int on = -1;
+        if (on < 0) {
+            on = getenv("R300_BLITLOG") != NULL;
+        }
+        if (on) {
+            qemu_log("VACC t=%lld %llx-%llx w=%d tag=%u\n",
+                     (long long)(g_get_monotonic_time() / 1000),
+                     (unsigned long long)lo, (unsigned long long)hi, write_access, tag);
+        }
+    }
     if (write_access && tag <= 5) {
         r200_rate.ops2d++;
         if (lo < (uint64_t)s->regs.crtc_offset + (uint64_t)s->disp.stride * s->disp.height &&
@@ -4445,6 +4456,15 @@ static bool mc_rect_is_tiled(PPCMacGPUState *s, uint32_t offset,
  * Returns false if either surface is tiled, and the caller must then fall
  * back to the per-pixel loop.
  */
+static bool blit_dbg_on(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        on = getenv("R300_BLITLOG") != NULL;
+    }
+    return on;
+}
+
 static bool blit_rect_untiled(PPCMacGPUState *s, uint8_t *vram,
                               uint32_t src_offset, uint32_t src_pitch,
                               uint32_t src_x, uint32_t src_y,
@@ -4455,6 +4475,11 @@ static bool blit_rect_untiled(PPCMacGPUState *s, uint8_t *vram,
     if (mc_rect_is_tiled(s, src_offset, src_pitch, src_x, src_y, bpp) ||
         mc_rect_is_tiled(s, dst_offset, dst_pitch, dst_x, dst_y, bpp)) {
         return false;
+    }
+    if (blit_dbg_on()) {   /* DEBUG r300-qgldbg7 */
+        qemu_log("BLT t=%lld src=%x/%u %u,%u dst=%x/%u %u,%u %ux%u bpp=%u\n",
+                 (long long)(g_get_monotonic_time() / 1000), src_offset, src_pitch,
+                 src_x, src_y, dst_offset, dst_pitch, dst_x, dst_y, w, h, bpp);
     }
 
     bool rev_rows = blit_overlaps(src_offset, src_pitch, src_x, src_y,
@@ -4527,6 +4552,11 @@ static void gart_blit_rows(PPCMacGPUState *s, AddressSpace *as, bool gart,
                            uint32_t dst_x, uint32_t dst_y,
                            uint32_t w, uint32_t h, uint32_t bpp)
 {
+    if (blit_dbg_on()) {   /* DEBUG r300-qgldbg7 */
+        qemu_log("GBLT t=%lld gart=%d src=%x/%u %u,%u dst=%x/%u %u,%u %ux%u bpp=%u\n",
+                 (long long)(g_get_monotonic_time() / 1000), gart, src_offset, src_pitch,
+                 src_x, src_y, dst_offset, dst_pitch, dst_x, dst_y, w, h, bpp);
+    }
     size_t row_bytes = (size_t)w * bpp;
     /*
      * 8-bit texels: VRAM holds aperture 0's 32-bit-swapped view of the

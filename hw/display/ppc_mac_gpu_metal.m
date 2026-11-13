@@ -9519,6 +9519,11 @@ static int r300_draw_encode(PPCMacGPUMetalState *st, uint8_t *vram_ptr,
                              U->tex_swz[t][2], U->tex_swz[t][3]);
                 }
             }
+            qemu_log(" cr=%x", U->clip_rule);
+            for (int r = 0; r < 4; r++) {
+                qemu_log(" %d,%d-%d,%d", U->cliprect[r][0], U->cliprect[r][1],
+                         U->cliprect[r][2], U->cliprect[r][3]);
+            }
             qemu_log("\n");
             if (pkt->glsl && pkt->glsl_id < 65536 &&
                 !(seen[pkt->glsl_id / 8] & (1 << (pkt->glsl_id % 8)))) {
