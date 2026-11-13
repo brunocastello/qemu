@@ -11911,6 +11911,96 @@ static void ppc_mac_gpu_mmio_write(void *opaque, hwaddr addr,
  * that need no ordering against it.  Type-0 ring packets call the inner
  * handlers directly.
  */
+/* DEBUG r300-qgldbg7: $R300_APWATCH=lo-hi (hex VRAM offsets) traps CPU
+ * accesses to aperture 0 over that range and logs them as runs;
+ * $R300_MMIOLOG logs guest register accesses (repeated reads folded). */
+static MemoryRegion apw_mr;
+static uint32_t apw_lo;
+static int apw_kind;                    /* 0 none, 1 read, 2 write */
+static uint32_t apw_start, apw_end;
+static uint64_t apw_first;
+
+static void apw_flush(void)
+{
+    if (apw_kind) {
+        qemu_log("APW %s %x-%x first=%016" PRIx64 " t=%lld\n", apw_kind == 2 ? "wr" : "rd",
+                 apw_start, apw_end, apw_first,
+                 (long long)(g_get_monotonic_time() / 1000));
+        apw_kind = 0;
+    }
+}
+
+static void apw_note(uint32_t off, unsigned size, int kind, uint64_t v)
+{
+    if (apw_kind == kind && off == apw_end) {
+        apw_end = off + size;
+        return;
+    }
+    apw_flush();
+    apw_kind = kind;
+    apw_start = off;
+    apw_end = off + size;
+    apw_first = v;
+}
+
+static uint64_t apw_read(void *opaque, hwaddr addr, unsigned size)
+{
+    PPCMacGPUState *s = opaque;
+    uint8_t *p = (uint8_t *)memory_region_get_ram_ptr(&s->vram) + apw_lo + addr;
+    uint64_t v = 0;
+    for (unsigned i = 0; i < size; i++) {
+        v = (v << 8) | p[i];
+    }
+    apw_note(apw_lo + addr, size, 1, v);
+    return v;
+}
+
+static void apw_write(void *opaque, hwaddr addr, uint64_t val, unsigned size)
+{
+    PPCMacGPUState *s = opaque;
+    uint8_t *p = (uint8_t *)memory_region_get_ram_ptr(&s->vram) + apw_lo + addr;
+    for (unsigned i = 0; i < size; i++) {
+        p[i] = val >> (8 * (size - 1 - i));
+    }
+    memory_region_set_dirty(&s->vram, apw_lo + addr, size);
+    apw_note(apw_lo + addr, size, 2, val);
+}
+
+static const MemoryRegionOps apw_ops = {
+    .read = apw_read,
+    .write = apw_write,
+    .endianness = DEVICE_BIG_ENDIAN,
+    .valid = { .min_access_size = 1, .max_access_size = 8 },
+    .impl = { .min_access_size = 1, .max_access_size = 8 },
+};
+
+static int mmiolog_on(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        on = getenv("R300_MMIOLOG") != NULL;
+    }
+    return on;
+}
+
+static void mmiolog(bool wr, hwaddr addr, uint64_t val)
+{
+    static hwaddr last_rd = ~0ull;
+    static unsigned rep;
+    if (!wr && addr == last_rd) {
+        rep++;
+        return;
+    }
+    if (rep) {
+        qemu_log("MMIO rd %04x x%u more\n", (unsigned)last_rd, rep);
+        rep = 0;
+    }
+    apw_flush();
+    last_rd = wr ? ~0ull : addr;
+    qemu_log("MMIO %s %04x %08x t=%lld\n", wr ? "wr" : "rd", (unsigned)addr,
+             (unsigned)val, (long long)(g_get_monotonic_time() / 1000));
+}
+
 static uint64_t ppc_mac_gpu_mmio_read_guest(void *opaque, hwaddr addr,
                                             unsigned int size)
 {
@@ -11920,7 +12010,11 @@ static uint64_t ppc_mac_gpu_mmio_read_guest(void *opaque, hwaddr addr,
         !(addr >= PPC_MAC_GPU_HWC_BASE && addr < PPC_MAC_GPU_HWC_END)) {
         ppc_mac_gpu_cp_sync(s, addr);
     }
-    return ppc_mac_gpu_mmio_read(opaque, addr, size);
+    uint64_t v = ppc_mac_gpu_mmio_read(opaque, addr, size);
+    if (mmiolog_on()) {
+        mmiolog(false, addr, v);
+    }
+    return v;
 }
 
 static void ppc_mac_gpu_mmio_write_guest(void *opaque, hwaddr addr,
@@ -11931,6 +12025,9 @@ static void ppc_mac_gpu_mmio_write_guest(void *opaque, hwaddr addr,
     if (addr != R200_CP_RB_WPTR &&
         !(addr >= PPC_MAC_GPU_HWC_BASE && addr < PPC_MAC_GPU_HWC_END)) {
         ppc_mac_gpu_cp_sync(s, addr);
+    }
+    if (mmiolog_on()) {
+        mmiolog(true, addr, val);
     }
     ppc_mac_gpu_mmio_write(opaque, addr, val, size);
 }
@@ -12610,6 +12707,17 @@ static void ppc_mac_gpu_realize(PCIDevice *dev, Error **errp)
         memory_region_init_io(&s->vram_ap1, obj, &r300_ap1_ops, s,
                               "ppc-mac-gpu-vram-ap1", s->vram_size);
         memory_region_add_subregion(&s->vram_bar, s->vram_size, &s->vram_ap1);
+        {
+            const char *w = getenv("R300_APWATCH");
+            unsigned lo, hi;
+            if (w && sscanf(w, "%x-%x", &lo, &hi) == 2 && hi > lo && hi <= s->vram_size) {
+                apw_lo = lo;
+                memory_region_init_io(&apw_mr, obj, &apw_ops, s, "ppc-mac-gpu-apwatch",
+                                      hi - lo);
+                memory_region_add_subregion_overlap(&s->vram_bar, lo, &apw_mr, 5);
+                qemu_log("APW watching %x-%x\n", lo, hi);
+            }
+        }
         pci_register_bar(dev, PPC_MAC_GPU_VRAM_BAR,
                          PCI_BASE_ADDRESS_MEM_PREFETCH, &s->vram_bar);
     } else {
