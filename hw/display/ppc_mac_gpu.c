@@ -3473,6 +3473,19 @@ static void r300_render(PPCMacGPUState *s, uint32_t opcode, const uint32_t *d,
             sync_each = getenv("R300_SYNC") != NULL;   /* debug: no batching */
         }
         r200_rate.gpu_vs += pkt.vs_glsl != NULL;
+        static R300Vertex mb_v[12];
+        static float mb_in[48][4];
+        static uint32_t mb_nv, mb_nin;
+        mb_nv = 0;
+        mb_nin = 0;
+        if (pkt.verts) {
+            mb_nv = pkt.num_verts < 12 ? pkt.num_verts : 12;
+            memcpy(mb_v, pkt.verts, mb_nv * sizeof(R300Vertex));
+        }
+        if (pkt.vs_in) {
+            mb_nin = pkt.vs_in_vecs < 48 ? pkt.vs_in_vecs : 48;
+            memcpy(mb_in, pkt.vs_in, mb_nin * sizeof(mb_in[0]));
+        }
         int rr = s->renderer->draw_r300(s->renderer_opaque, vram, s->vram_size, &pkt);
         if (s->r3_dump && g_r300_arm_rt && pkt.rt_gpu_addr == g_r300_arm_rt) {
             fprintf(s->r3_dump, "   renderer -> %d\n", rr);
@@ -3527,19 +3540,19 @@ static void r300_render(PPCMacGPUState *s, uint32_t opcode, const uint32_t *d,
                             pkt.tex[0].bound, pkt.tex[0].gpu_addr, pkt.tex[0].width,
                             pkt.tex[0].height, pkt.tex[0].kind, pkt.uniforms.tex_info[0][1],
                             r300_reg(s->r3, 0x4E04), pkt.rt_pitch, pkt.glsl_id);
-                    for (uint32_t v = 0; pkt.vs_in && v < pkt.vs_in_vecs && v < 48; v++) {
-                        fprintf(mbl, "  in%02u %g %g %g %g\n", v, pkt.vs_in[v][0],
-                                pkt.vs_in[v][1], pkt.vs_in[v][2], pkt.vs_in[v][3]);
+                    for (uint32_t v = 0; v < mb_nin; v++) {
+                        fprintf(mbl, "  in%02u %g %g %g %g\n", v, mb_in[v][0],
+                                mb_in[v][1], mb_in[v][2], mb_in[v][3]);
                     }
                     fprintf(mbl, "  vport xs %g xo %g ys %g yo %g vte %08x rtw %u\n",
                             r300_mbf(r300_reg(s->r3, 0x1D98)), r300_mbf(r300_reg(s->r3, 0x1D9C)),
                             r300_mbf(r300_reg(s->r3, 0x1DA0)), r300_mbf(r300_reg(s->r3, 0x1DA4)),
                             r300_reg(s->r3, 0x20B0), pkt.rt_width);
-                    for (uint32_t v = 0; pkt.verts && v < pkt.num_verts && v < 12; v++) {
+                    for (uint32_t v = 0; v < mb_nv; v++) {
                         fprintf(mbl, "  v%u pos %g %g %g %g  t0 %g %g %g %g\n", v,
-                                pkt.verts[v].pos[0], pkt.verts[v].pos[1], pkt.verts[v].pos[2],
-                                pkt.verts[v].pos[3], pkt.verts[v].v[0][0], pkt.verts[v].v[0][1],
-                                pkt.verts[v].v[0][2], pkt.verts[v].v[0][3]);
+                                mb_v[v].pos[0], mb_v[v].pos[1], mb_v[v].pos[2],
+                                mb_v[v].pos[3], mb_v[v].v[0][0], mb_v[v].v[0][1],
+                                mb_v[v].v[0][2], mb_v[v].v[0][3]);
                     }
                     for (uint32_t v = 0; pkt.vs_idx && v < pkt.num_verts && v < 12; v++) {
                         fprintf(mbl, "  idx %u\n", pkt.vs_idx[v]);
