@@ -4070,6 +4070,13 @@ static bool host_data_put_narrow(PPCMacGPUState *s, uint8_t *vram, uint32_t val,
      * other x positions in its X8 atlas came out scrambled.
      */
     bool lanes = s->r300 && bpp == 1;
+    if (lanes && *cx == 0 && *cy == 0 && getenv("R300_BLIT8LOG")) {   /* DEBUG */
+        static int nh;
+        if (nh++ < 4000) {
+            fprintf(stderr, "hd8 dst %08x/%u %u,%u %ux%u first %08x\n",
+                    (uint32_t)base, pitch, x0, y0, w, h, val);
+        }
+    }
     for (int i = 0; i < 4; i += bpp) {
         if (*cy >= h) {
             return false;
