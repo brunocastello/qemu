@@ -1379,7 +1379,7 @@ char *r300_us_to_glsl(const R300State *st, const R300FSDesc *desc,
     unsigned work = 0;
     /* Debug ($R300_FSDBG=<hex US_ALU_RGB_ADDR of the first ALU>): trace
      * the matching program in its own output, pixel x = ALU step, row
-     * y = register (y / 3; 7 = oc[0]) and part (y % 3: rgb, alpha, |rgb|/16). */
+     * y = register (y / 2; 11 = oc[0]) and part (y % 2: rgb; alpha, |alpha|/16, sign). */
     bool dbg = false;
     unsigned dbg_alu = 0;
     {
@@ -1427,7 +1427,7 @@ char *r300_us_to_glsl(const R300State *st, const R300FSDesc *desc,
         for (unsigned k = 0; k < nd->alu_count; k++) {
             us_emit_alu(&body, st, nd->alu_start + k);
             if (dbg) {
-                r300_sb_printf(&body, "    if (dstep == %u) dbgv = dreg == 7 ? oc[0] : t[dreg];\n",
+                r300_sb_printf(&body, "    if (dstep == %u) dbgv = dreg == 11 ? oc[0] : t[dreg];\n",
                                dbg_alu);
             }
             dbg_alu++;
@@ -1529,13 +1529,12 @@ char *r300_us_to_glsl(const R300State *st, const R300FSDesc *desc,
     r300_sb_printf(&sb,
         "    vec4 oc[4] = vec4[4](vec4(0.0, 0.0, 0.0, 1.0), vec4(0.0, 0.0, 0.0, 1.0),\n"
         "                         vec4(0.0, 0.0, 0.0, 1.0), vec4(0.0, 0.0, 0.0, 1.0));\n%s%s%s",
-        dbg ? "    ivec2 dpx = ivec2(gl_FragCoord.xy); int dstep = dpx.x, dreg = min(dpx.y / 3, 7),"
-              " dpart = dpx.y % 3; vec4 dbgv = vec4(0.0);\n" : "",
+        dbg ? "    ivec2 dpx = ivec2(gl_FragCoord.xy); int dstep = dpx.x, dreg = min(dpx.y / 2, 11),"
+              " dpart = dpx.y % 2; vec4 dbgv = vec4(0.0);\n" : "",
         body.buf ? body.buf : "",
         dbg ? "    oc[0] = dpart == 0 ? vec4(clamp(dbgv.rgb, 0.0, 1.0), 1.0)\n"
-              "          : dpart == 1 ? vec4(clamp(dbgv.a, 0.0, 1.0), clamp(abs(dbgv.a) / 16.0, 0.0, 1.0),"
-              " dbgv.a < 0.0 ? 1.0 : 0.0, 1.0)\n"
-              "          : vec4(clamp(abs(dbgv.rgb) / 16.0, 0.0, 1.0), 1.0);\n" : "");
+              "          : vec4(clamp(dbgv.a, 0.0, 1.0), clamp(abs(dbgv.a) / 16.0, 0.0, 1.0),"
+              " dbgv.a < 0.0 ? 1.0 : 0.0, 1.0);\n" : "");
     r300_sb_printf(&sb,
         "    /* FG: fog, then the alpha test on render target A. */\n"
         "    if ((u.fog_blend & 1u) != 0u) {\n"
