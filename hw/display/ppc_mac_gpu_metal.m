@@ -9543,6 +9543,8 @@ static int r300_draw_encode(PPCMacGPUMetalState *st, uint8_t *vram_ptr,
                     }
                 }
             }
+            qemu_log(" Z=%x/%x/%x/%x da=%u doff=%x dp=%u", U->zinfo[0], U->zinfo[1], U->zinfo[2],
+                     U->zinfo[3], pkt->depth.attach, pkt->depth.gpu_addr, pkt->depth.pitch);
             qemu_log(" cr=%x", U->clip_rule);
             for (int r = 0; r < 4; r++) {
                 qemu_log(" %d,%d-%d,%d", U->cliprect[r][0], U->cliprect[r][1],
