@@ -13156,7 +13156,7 @@ static void ati_radeon_9700_class_init(ObjectClass *klass, void *data)
 
     k->device_id = PPC_MAC_GPU_R300_DEVICE_ID;
     k->revision = 0x00;
-    dc->desc = "ATI Radeon 9700 (Mac OS X 10.3-10.5, Quartz Extreme)";
+    dc->desc = "ATI Radeon 9700";
 }
 
 static const TypeInfo ati_radeon_9700_type_info = {
