@@ -559,7 +559,8 @@ static void pg_base(PVSGlsl *g, uint32_t s, char *buf, size_t len)
         }
         break;
     case SRC_CONST:
-        if ((int)idx <= g->prog->max_const) {
+        /* constants past the count are zero in the uniforms (gpu_vs) */
+        if (idx < 256) {
             snprintf(buf, len, "vs.c[%u]", idx);
             return;
         }

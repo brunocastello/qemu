@@ -1317,7 +1317,6 @@ static const GpuVs *gpu_vs_get(const R300State *st, const R300PVSProgram *prog,
     }
     key_push(&key, &klen, &kcap, prog->first_inst);
     key_push(&key, &klen, &kcap, prog->last_inst);
-    key_push(&key, &klen, &kcap, prog->max_const);
     key_push(&key, &klen, &kcap, prog->fc_opc);
     key_push(&key, &klen, &kcap, persp | fog << 1 | fogsel << 2 | clip << 8);
     for (unsigned k = prog->first_inst * 4; k < (prog->last_inst + 1) * 4; k++) {
@@ -1367,14 +1366,13 @@ static const GpuVs *gpu_vs_get(const R300State *st, const R300PVSProgram *prog,
             "layout(location = 8) out vec4 v8; layout(location = 9) out vec4 v9;\n"
             "layout(location = 10) out vec4 aux;\n"
             "%s"
-            "vec4 pvs_c(int x) { return x >= 0 && x <= %d ? vs.c[x] : vec4(0.0); }\n"
+            "vec4 pvs_c(int x) { return x >= 0 && x <= 255 ? vs.c[x] : vec4(0.0); }\n"
             "\n"
             "void main()\n"
             "{\n"
             "    uint vb = uint(gl_VertexIndex) * vs.info.x;\n",
             r300_pvs_glsl_helpers,
-            clip ? "out gl_PerVertex { vec4 gl_Position; float gl_ClipDistance[6]; };\n" : "",
-            prog->max_const);
+            clip ? "out gl_PerVertex { vec4 gl_Position; float gl_ClipDistance[6]; };\n" : "");
         for (unsigned i = 0, slot = 0; i < R300_PVS_NUM_INPUTS; i++) {
             if (in_used & (1u << i)) {
                 r300_sb_printf(&sb, "    vec4 i%u = vin[vb + %uu];\n", i, slot++);
@@ -1482,7 +1480,10 @@ static bool gpu_vs_build(const R300State *st, Fetch *f, const R300PVSProgram *pr
     free(pos);
 
     R300VSUniforms *u = calloc(1, sizeof(*u));
-    memcpy(u->c, prog->consts, sizeof(u->c));
+    /* Reads past VAP_PVS_CONST_CNTL's count return 0: zero those slots
+     * here rather than bound the reads in the text, so one program text
+     * serves every constant count (each text is a shader compile). */
+    memcpy(u->c, prog->consts, (size_t)(prog->max_const + 1) * sizeof(u->c[0]));
     for (int k = 0; k < 6; k++) {
         memcpy(u->ucp[k], &st->pvs_mem[(R300_PVS_UCP_START + k) * 4], sizeof(u->ucp[k]));
     }
