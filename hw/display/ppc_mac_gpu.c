@@ -3496,7 +3496,12 @@ static void r300_render(PPCMacGPUState *s, uint32_t opcode, const uint32_t *d,
                 if (mbl && !mba[0]) {
                     snprintf(mba, sizeof(mba), "%s.arm", mbp);
                 }
-                if (mbl && pkt.rt_pitch <= 64 && mbn < 2000 && access(mba, F_OK) == 0 &&
+                static uint32_t mbmax;
+                if (!mbmax) {
+                    const char *e = getenv("R300_MBDUMP_MAXPITCH");
+                    mbmax = e ? (uint32_t)atoi(e) : 64;
+                }
+                if (mbl && pkt.rt_pitch <= mbmax && mbn < 4000 && access(mba, F_OK) == 0 &&
                     s->renderer->flush_r200) {
                     char path[300];
                     FILE *f;
@@ -3508,13 +3513,13 @@ static void r300_render(PPCMacGPUState *s, uint32_t opcode, const uint32_t *d,
                         fclose(f);
                     }
                     fprintf(mbl, "M%04u D%llu rt %06x h %u bpp %u sc %u,%u-%u,%u nv %u vecs %u vs %d "
-                            "t0 %d %06x %ux%u kind %u dec %u cb %08x\n", mbn,
+                            "t0 %d %06x %ux%u kind %u dec %u cb %08x pitch %u glsl %u\n", mbn,
                             (unsigned long long)s->r3->draws, pkt.rt_gpu_addr, pkt.rt_height,
                             pkt.rt_bpp, pkt.scissor[0], pkt.scissor[1], pkt.scissor[2],
                             pkt.scissor[3], pkt.num_verts, pkt.vs_in_vecs, pkt.vs_glsl != NULL,
                             pkt.tex[0].bound, pkt.tex[0].gpu_addr, pkt.tex[0].width,
                             pkt.tex[0].height, pkt.tex[0].kind, pkt.uniforms.tex_info[0][1],
-                            r300_reg(s->r3, 0x4E04));
+                            r300_reg(s->r3, 0x4E04), pkt.rt_pitch, pkt.glsl_id);
                     for (uint32_t v = 0; pkt.vs_in && v < pkt.vs_in_vecs && v < 48; v++) {
                         fprintf(mbl, "  in%02u %g %g %g %g\n", v, pkt.vs_in[v][0],
                                 pkt.vs_in[v][1], pkt.vs_in[v][2], pkt.vs_in[v][3]);
