@@ -3145,10 +3145,14 @@ static void r300_e0_note(uint32_t base, uint32_t size, bool e0)
     }
 }
 
+/* Only a texture that starts where such a render did: the Dock samples
+ * its layers from their base.  "Anywhere inside" also caught textures
+ * the CPU wrote straight into VRAM over an old layer (no hook sees
+ * those), and washed out System Preferences' Aqua controls. */
 static bool r300_e0_has(uint32_t addr)
 {
     for (int i = 0; i < R300_E0_RANGES; i++) {
-        if (r300_e0[i].size && addr - r300_e0[i].base < r300_e0[i].size) {
+        if (r300_e0[i].size && addr == r300_e0[i].base) {
             return true;
         }
     }
