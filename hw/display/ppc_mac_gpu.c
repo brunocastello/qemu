@@ -3273,18 +3273,15 @@ static void r300_render(PPCMacGPUState *s, uint32_t opcode, const uint32_t *d,
             continue;
         }
         /*
-         * 32-bit texels decode in the shader (tex_info.y), which assumes
-         * VRAM: the aperture's 32-bit swap leaves the CPU's view there, so
-         * no TXO swap reads reversed.  The card reads system memory as the
-         * guest's bytes, the other way round: there a 32-bit swap reverses
-         * and none does not (r300_tex_card_words does the same for the
-         * CPU-converted kinds).  Leopard's list selections are GART
-         * textures with a 32-bit swap; decoded as VRAM, blue came out
-         * purple.
+         * 32-bit texels decode in the shader (tex_info.y): reversed for
+         * no TXO swap, as is for a 32-bit swap, which is right for VRAM.
+         * GART textures with a 32-bit swap read reversed as well (Leopard
+         * draws list selections from one: as is, the blue highlight came
+         * out purple), while unswapped ones (Aqua buttons) decode as in
+         * VRAM.  Measured on Leopard; 16-bit swaps unchanged.
          */
-        if (td->kind == R300_TEXK_RGBA8) {
-            static const uint32_t gart_decode[4] = { 0, 2, 1, 0 };
-            pkt.uniforms.tex_info[t][1] = gart_decode[td->endian & 3];
+        if (td->kind == R300_TEXK_RGBA8 && (td->endian & 3) == 2) {
+            pkt.uniforms.tex_info[t][1] = 1;
         }
         static bool said;
         if (!said) {
