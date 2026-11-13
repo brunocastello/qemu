@@ -556,7 +556,11 @@ void r300_tex_level_dims(const R300TexDesc *td, uint32_t l, uint32_t *w,
  * driver puts them there (a 64x64 RGB565 chain: 8x8 at +0x2a00, 4x4 at
  * +0x2a80, 2x2 at +0x2ac0, all with 16-byte rows; RGBA8 4x4 and smaller
  * the same), and with 32-byte rows every level under 16 bytes wide read
- * other texels: GLQuake's distant floors came out pink and green. */
+ * other texels: GLQuake's distant floors came out pink and green.
+ * Compressed textures follow the same rule per row of 4x4 blocks (a
+ * 512x512 DXT1 chain: the 8x8 level's two 8-byte blocks in a 16-byte
+ * row, the 4x4 level 32 bytes later); UT2004's distant terrain showed a
+ * green and black band with 32-byte rows. */
 void r300_tex_layout(R300TexDesc *td, uint32_t bpp, bool dxt, bool pitch_en)
 {
     bool pot_rows = td->levels > 1 || td->dim != R300_TEXDIM_2D;
@@ -569,13 +573,9 @@ void r300_tex_layout(R300TexDesc *td, uint32_t bpp, bool dxt, bool pitch_en)
         if (pot_rows) {
             h = pot_ceil(h);
         }
-        if (dxt) {
-            pitch = (((w + 3) / 4) * bpp + 31) & ~31u;
-            rows = (h + 3) / 4;
-        } else {
-            pitch = l == 0 ? (w * bpp + 31) & ~31u : (w * bpp + 15) & ~15u;
-            rows = h;
-        }
+        uint32_t row = dxt ? ((w + 3) / 4) * bpp : w * bpp;
+        pitch = l == 0 ? (row + 31) & ~31u : (row + 15) & ~15u;
+        rows = dxt ? (h + 3) / 4 : h;
         if (l == 0 && pitch_en) {
             pitch = td->pitch_bytes;
         }
