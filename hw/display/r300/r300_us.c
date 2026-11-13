@@ -413,7 +413,8 @@ static void us_emit_alu(R300Sb *sb, const R300State *st, unsigned i)
 
     static int lmul = -1;
     if (lmul < 0) {
-        lmul = getenv("R300_LEGACY_MUL") != NULL;
+        const char *e = getenv("R300_LEGACY_MUL");
+        lmul = !(e && e[0] == '0');
     }
     /* The dot product feeds both halves (alpha OP_DP takes it). */
     if (lmul) {
