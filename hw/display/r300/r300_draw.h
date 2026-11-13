@@ -300,5 +300,6 @@ uint8_t *r300_tex_level_bytes(const R300TexDesc *td, const uint8_t *src,
 /* 64-bit content hash, for caches of textures copied out of guest memory. */
 uint64_t r300_hash_bytes(const uint8_t *p, size_t n);
 uint64_t r300_hash_tex(const uint8_t *p, size_t n);
+uint64_t r300_tex_identity(const R300TexDesc *td, const uint8_t *src);
 
 #endif

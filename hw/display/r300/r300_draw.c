@@ -2105,6 +2105,20 @@ static void r300_tex_card_words(const R300TexDesc *td, uint8_t *p, size_t n)
     }
 }
 
+/*
+ * r300_hash_tex for a texture: 8-bit texels in full.  QuartzGL keeps its
+ * glyphs in an X8 atlas and adds a few at a time, which a sampled hash
+ * misses (the stale copy drew later glyphs wrong); such atlases are
+ * small next to the DXT chains the sampling is for.
+ */
+uint64_t r300_tex_identity(const R300TexDesc *td, const uint8_t *src)
+{
+    if (td->kind == R300_TEXK_R8) {
+        return r300_hash_bytes(src, td->size_bytes) ^ td->size_bytes;
+    }
+    return r300_hash_tex(src, td->size_bytes);
+}
+
 uint8_t *r300_tex_level_bytes(const R300TexDesc *td, const uint8_t *src,
                                  uint32_t l, uint32_t w, uint32_t h,
                                  uint32_t *bpr)

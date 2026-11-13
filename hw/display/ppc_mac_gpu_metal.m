@@ -9224,7 +9224,7 @@ static id<MTLTexture> r300_texture_full(PPCMacGPUMetalState *st, id<MTLDevice> d
     R300TexCacheKey key = { td->gpu_addr, td->format, td->kind, td->width, td->height,
                             td->depth, td->dim, td->levels, td->pitch_bytes,
                             td->host_data != NULL ? 1u + (td->endian << 1) : td->endian << 1,
-                            r300_hash_tex(src, td->size_bytes) };
+                            r300_tex_identity(td, src) };
     int lru = 0;
     for (int i = 0; i < R300_TCACHE; i++) {
         if (g_r300_tcache[i].tex && !memcmp(&g_r300_tcache[i].key, &key, sizeof(key))) {
