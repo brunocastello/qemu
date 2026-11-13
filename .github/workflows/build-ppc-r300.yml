@@ -1,11 +1,13 @@
 name: Build qemu-system-ppc (macOS arm64, self-contained)
 on:
   workflow_dispatch:
+    inputs:
+      runner: { description: 'runner label', default: 'macos-15' }
   push:
     branches: [r300-port]
 jobs:
   build:
-    runs-on: macos-15
+    runs-on: ${{ inputs.runner || 'macos-15' }}
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 1 }
