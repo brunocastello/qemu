@@ -1177,7 +1177,10 @@ static void us_emit_cb(R300Sb *sb, const R300State *st, unsigned k)
     } else {
         snprintf(sel, sizeof(sel), "uvec4(%uu, %uu, %uu, %uu)", (ofr >> 8) & 3,
                  (ofr >> 10) & 3, (ofr >> 12) & 3, (ofr >> 14) & 3);
-        snprintf(swap, sizeof(swap), "%uu", e == 2);
+        {   /* DEBUG r300-qgldbg7 */
+            const char *v = getenv("R300_E0SWAP");
+            snprintf(swap, sizeof(swap), "%uu", e == 2 || (v && v[0] == '1' && e == 0));
+        }
     }
     for (int n = 0; n < 4; n++) {
         sg[n] = (ofr >> (16 + n)) & 1;

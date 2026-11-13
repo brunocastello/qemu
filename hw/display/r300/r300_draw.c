@@ -493,7 +493,15 @@ static void set_uniforms(const R300State *st, R300DrawPacket *pkt)
     for (int n = 0; n < 4; n++) {
         u->out_sel[n] = (outfmt >> (8 + 2 * n)) & 3;
     }
-    u->rt_swap32 = ((r300_reg(st, RB3D_COLORPITCH0) >> 19) & 3) == 2;
+    {   /* DEBUG r300-qgldbg7: R300_E0SWAP=1 stores endian-0 targets reversed too */
+        static int e0 = -1;
+        uint32_t e = (r300_reg(st, RB3D_COLORPITCH0) >> 19) & 3;
+        if (e0 < 0) {
+            const char *v = getenv("R300_E0SWAP");
+            e0 = v && v[0] == '1';
+        }
+        u->rt_swap32 = e == 2 || (e0 && e == 0);
+    }
     u->rt_endian = (r300_reg(st, RB3D_COLORPITCH0) >> 19) & 3;
     u->clip_rule = r300_reg(st, SC_CLIP_RULE) & 0xFFFF;
     for (int i = 0; i < 4; i++) {
