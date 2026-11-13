@@ -9519,7 +9519,7 @@ static int r300_draw_encode(PPCMacGPUMetalState *st, uint8_t *vram_ptr,
                              U->tex_swz[t][2], U->tex_swz[t][3]);
                 }
             }
-            if (pkt->verts && pkt->num_verts <= 6) {
+            if (pkt->verts && pkt->num_verts <= 12) {
                 for (uint32_t vi = 0; vi < pkt->num_verts; vi++) {
                     const R300Vertex *V = &pkt->verts[vi];
                     qemu_log(" V%u=(%.1f,%.1f,%.2f,%.2f|%.3f,%.3f,%.3f,%.3f|%.3f,%.3f,%.3f,%.3f)", vi,
@@ -9527,7 +9527,7 @@ static int r300_draw_encode(PPCMacGPUMetalState *st, uint8_t *vram_ptr,
                              V->v[0][0], V->v[0][1], V->v[0][2], V->v[0][3],
                              V->v[1][0], V->v[1][1], V->v[1][2], V->v[1][3]);
                 }
-            } else if (pkt->vs_glsl && pkt->vs_in && pkt->vs_idx && pkt->num_verts <= 6) {
+            } else if (pkt->vs_glsl && pkt->vs_in && pkt->vs_idx && pkt->num_verts <= 12) {
                 uint32_t per = pkt->vs_u ? pkt->vs_u->info[0] : 1;
                 per = per ? (per > 4 ? 4 : per) : 1;
                 uint32_t stride = pkt->vs_u && pkt->vs_u->info[0] ? pkt->vs_u->info[0] : 1;
