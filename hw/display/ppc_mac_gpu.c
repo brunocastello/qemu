@@ -4061,13 +4061,26 @@ static bool host_data_put_narrow(PPCMacGPUState *s, uint8_t *vram, uint32_t val,
                                  uint32_t x0, uint32_t y0, uint32_t w, uint32_t h,
                                  uint32_t *cx, uint32_t *cy)
 {
+    /*
+     * 8-bit on the R300: the card takes the dword byte-reversed from how
+     * it arrives here (the 32bpp path stores it host-endian, which is
+     * VRAM's aperture-0 view), so its first pixel is the top byte, and
+     * the card's byte c sits at c ^ 3 in VRAM.  Placing bytes linearly
+     * only agreed for rows starting on a dword: QuartzGL's glyphs at
+     * other x positions in its X8 atlas came out scrambled.
+     */
+    bool lanes = s->r300 && bpp == 1;
     for (int i = 0; i < 4; i += bpp) {
         if (*cy >= h) {
             return false;
         }
         uint64_t a = base + (uint64_t)(y0 + *cy) * pitch +
                      (uint64_t)(x0 + *cx) * bpp;
-        if (a + bpp <= s->vram_size) {
+        if (lanes) {
+            if ((a | 3) < s->vram_size) {
+                vram[a ^ 3] = val >> (8 * (3 - i));
+            }
+        } else if (a + bpp <= s->vram_size) {
             for (uint32_t b = 0; b < bpp; b++) {
                 vram[a + b] = val >> (8 * (i + b));
             }
