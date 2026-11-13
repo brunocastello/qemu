@@ -3492,7 +3492,12 @@ static void r300_render(PPCMacGPUState *s, uint32_t opcode, const uint32_t *d,
                         mbl = fopen(lp, "w");
                     }
                 }
-                if (mbl && pkt.rt_pitch == 64 && mbn < 600 && s->renderer->flush_r200) {
+                static char mba[300];
+                if (mbl && !mba[0]) {
+                    snprintf(mba, sizeof(mba), "%s.arm", mbp);
+                }
+                if (mbl && pkt.rt_pitch <= 64 && mbn < 2000 && access(mba, F_OK) == 0 &&
+                    s->renderer->flush_r200) {
                     char path[300];
                     FILE *f;
                     s->renderer->flush_r200(s->renderer_opaque);
