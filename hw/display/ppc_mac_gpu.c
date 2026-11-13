@@ -4445,6 +4445,15 @@ static bool blit_rect_untiled(PPCMacGPUState *s, uint8_t *vram,
                                   dst_offset, dst_pitch, dst_x, dst_y,
                                   w, h, bpp) && dst_y > src_y;
     size_t row_bytes = (size_t)w * bpp;
+    /*
+     * 8-bit pixels on the R300: VRAM holds aperture 0's 32-bit-swapped
+     * view, so the card's byte c sits at c ^ 3.  Copy by the card's
+     * positions; a plain move is only right where source and
+     * destination share their place in a dword, and only for whole
+     * dwords.  (QuartzGL copies glyphs into an X8 atlas this way:
+     * glyphs that landed at another dword offset came out scrambled.)
+     */
+    uint8_t *tmp = s->r300 && bpp == 1 ? g_malloc(row_bytes + 6) : NULL;
 
     for (uint32_t r = 0; r < h; r++) {
         uint32_t row = rev_rows ? (h - 1 - r) : r;
@@ -4457,12 +4466,27 @@ static bool blit_rect_untiled(PPCMacGPUState *s, uint8_t *vram,
 
         /* Drop rows that fall outside VRAM, matching the per-pixel path,
          * which silently discards out-of-range pixels. */
-        if (s_row + row_bytes > s->vram_size ||
-            d_row + row_bytes > s->vram_size) {
+        /* the ^ 3 reach is the rest of the last dword */
+        uint64_t s_end = s_row + row_bytes, d_end = d_row + row_bytes;
+        if (tmp) {
+            s_end = (s_end + 3) & ~3ull;
+            d_end = (d_end + 3) & ~3ull;
+        }
+        if (s_end > s->vram_size || d_end > s->vram_size) {
+            continue;
+        }
+        if (tmp) {
+            for (size_t i = 0; i < row_bytes; i++) {
+                tmp[i] = vram[(s_row + i) ^ 3];
+            }
+            for (size_t i = 0; i < row_bytes; i++) {
+                vram[(d_row + i) ^ 3] = tmp[i];
+            }
             continue;
         }
         memmove(vram + d_row, vram + s_row, row_bytes);
     }
+    g_free(tmp);
     return true;
 }
 
