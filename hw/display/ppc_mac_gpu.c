@@ -3415,6 +3415,42 @@ static void r300_render(PPCMacGPUState *s, uint32_t opcode, const uint32_t *d,
         }
         r200_rate.gpu_vs += pkt.vs_glsl != NULL;
         int rr = s->renderer->draw_r300(s->renderer_opaque, vram, s->vram_size, &pkt);
+        {   /* DEBUG: $R300_CAPRT=hex: after each draw into that target, dump
+             * it and texture 0 (first 60 draws) to capN-rt.bin / capN-t0.bin */
+            static int cap = -1, capn;
+            static uint32_t caprt;
+            if (cap < 0) {
+                const char *e = getenv("R300_CAPRT");
+                cap = e && sscanf(e, "%x", &caprt) == 1;
+            }
+            if (cap && pkt.rt_gpu_addr == caprt && capn < 60) {
+                char fn[64];
+                r200_flush_at(s, R200_WHY_TAG(R200_WHY_OTHER));
+                uint64_t n = (uint64_t)pkt.rt_pitch * pkt.rt_bpp * pkt.rt_height;
+                snprintf(fn, sizeof(fn), "cap%02d-rt.bin", capn);
+                FILE *f = fopen(fn, "wb");
+                if (f && caprt + n <= s->vram_size) {
+                    fwrite(vram + caprt, 1, n, f);
+                }
+                if (f) {
+                    fclose(f);
+                }
+                if (pkt.tex[0].bound && !pkt.tex[0].host_data &&
+                    (uint64_t)pkt.tex[0].gpu_addr + pkt.tex[0].size_bytes <= s->vram_size) {
+                    snprintf(fn, sizeof(fn), "cap%02d-t0.bin", capn);
+                    f = fopen(fn, "wb");
+                    if (f) {
+                        fwrite(vram + pkt.tex[0].gpu_addr, 1, pkt.tex[0].size_bytes, f);
+                        fclose(f);
+                    }
+                }
+                qemu_log("CAP %d rt=%x %ux%u p%u t0=%x %ux%u p%u\n", capn, caprt,
+                         pkt.rt_width, pkt.rt_height, pkt.rt_pitch,
+                         pkt.tex[0].bound ? pkt.tex[0].gpu_addr : 0, pkt.tex[0].width,
+                         pkt.tex[0].height, pkt.tex[0].pitch_bytes);
+                capn++;
+            }
+        }
         if (s->r3_dump && g_r300_arm_rt && pkt.rt_gpu_addr == g_r300_arm_rt) {
             fprintf(s->r3_dump, "   renderer -> %d\n", rr);
         }
