@@ -9377,9 +9377,12 @@ static id<MTLTexture> r300_texture(PPCMacGPUMetalState *st, id<MTLDevice> dev,
     case R300_TEXK_RG8:   pf = MTLPixelFormatRG8Unorm; break;
     default:              pf = MTLPixelFormatInvalid; break;
     }
-    if (pf != MTLPixelFormatInvalid && td->host_data) {
-        /* Copied out of the GART by the device: uploaded through the
-         * content-hash cache, so an unchanged texture costs a hash. */
+    if (pf != MTLPixelFormatInvalid &&
+        (td->host_data || (td->kind == R300_TEXK_R8 && (td->endian & 3) != 2))) {
+        /* Copied out of the GART by the device, or 8-bit texels whose
+         * words the card reads in another byte order than VRAM holds
+         * them (r300_tex_level_bytes reorders them): uploaded through
+         * the content-hash cache, so an unchanged texture costs a hash. */
         return r300_texture_full(st, dev, vram_ptr, td);
     }
     if (pf != MTLPixelFormatInvalid) {
