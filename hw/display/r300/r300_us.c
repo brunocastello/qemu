@@ -413,12 +413,13 @@ static void us_emit_alu(R300Sb *sb, const R300State *st, unsigned i)
 
     /* The dot product feeds both halves (alpha OP_DP takes it). */
     r300_sb_printf(sb, "        float dp = %s;\n",
-                   rop == 2 ? "dot(rA, rB) + aA * aB" :
-                   rop == 3 ? "rA.r * rB.r + rA.g * rB.g + rC.b" : "dot(rA, rB)");
+                   rop == 2 ? "r300_ldot3(rA, rB) + r300_lm1(aA, aB)" :
+                   rop == 3 ? "r300_lm1(rA.r, rB.r) + r300_lm1(rA.g, rB.g) + rC.b" :
+                              "r300_ldot3(rA, rB)");
 
     /* Alpha result first: OP_SOP hands it to the RGB half. */
     switch (aop) {
-    case 0:  r300_sb_printf(sb, "        float ar = aA * aB + aC;\n"); break;
+    case 0:  r300_sb_printf(sb, "        float ar = r300_lm1(aA, aB) + aC;\n"); break;
     case 1:  r300_sb_printf(sb, "        float ar = dp;\n"); break;
     case 2:  r300_sb_printf(sb, "        float ar = min(aA, aB);\n"); break;
     case 3:  r300_sb_printf(sb, "        float ar = max(aA, aB);\n"); break;
@@ -432,7 +433,7 @@ static void us_emit_alu(R300Sb *sb, const R300State *st, unsigned i)
     default: r300_sb_printf(sb, "        float ar = 0.0;\n"); break;
     }
     switch (rop) {
-    case 0:  r300_sb_printf(sb, "        vec3 rr = rA * rB + rC;\n"); break;
+    case 0:  r300_sb_printf(sb, "        vec3 rr = r300_lm3(rA, rB) + rC;\n"); break;
     case 1:
     case 2:
     case 3:  r300_sb_printf(sb, "        vec3 rr = vec3(dp);\n"); break;
@@ -581,6 +582,14 @@ static const char us_prelude[] =
 "layout(location = 8) in vec4 v8; layout(location = 9) in vec4 v9;\n"
 "layout(location = 10) in vec4 aux;\n"
 "\n"
+"/* R300 multiplies: 0 times anything (inf, NaN) is 0, the DX9 rule;\n"
+"   IEEE's NaN there turned Leopard's menu bar Apple into a dark box. */\n"
+"float r300_lm1(float a, float b) { return (a == 0.0 || b == 0.0) ? 0.0 : a * b; }\n"
+"vec3 r300_lm3(vec3 a, vec3 b)\n"
+"{\n"
+"    return mix(a * b, vec3(0.0), lessThanEqual(min(abs(a), abs(b)), vec3(0.0)));\n"
+"}\n"
+"float r300_ldot3(vec3 a, vec3 b) { vec3 p = r300_lm3(a, b); return p.x + p.y + p.z; }\n"
 "float r300_swz1(vec4 v, uint s)\n"
 "{\n"
 "    return s < 4u ? v[s] : (s == 5u ? 1.0 : 0.0);\n"
