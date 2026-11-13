@@ -4553,9 +4553,10 @@ static void gart_blit_rows(PPCMacGPUState *s, AddressSpace *as, bool gart,
                            uint32_t w, uint32_t h, uint32_t bpp)
 {
     if (blit_dbg_on()) {   /* DEBUG r300-qgldbg7 */
-        qemu_log("GBLT t=%lld gart=%d src=%x/%u %u,%u dst=%x/%u %u,%u %ux%u bpp=%u\n",
+        qemu_log("GBLT t=%lld gart=%d src=%x/%u %u,%u dst=%x/%u %u,%u %ux%u bpp=%u swap=%u\n",
                  (long long)(g_get_monotonic_time() / 1000), gart, src_offset, src_pitch,
-                 src_x, src_y, dst_offset, dst_pitch, dst_x, dst_y, w, h, bpp);
+                 src_x, src_y, dst_offset, dst_pitch, dst_x, dst_y, w, h, bpp,
+                 s->r300_src_swap);
     }
     size_t row_bytes = (size_t)w * bpp;
     /*
