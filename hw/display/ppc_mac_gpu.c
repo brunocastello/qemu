@@ -3476,6 +3476,51 @@ static void r300_render(PPCMacGPUState *s, uint32_t opcode, const uint32_t *d,
             if (sync_each && s->renderer->flush_r200) {
                 s->renderer->flush_r200(s->renderer_opaque);
             }
+            /* Debug ($R300_MBDUMP=prefix): each draw into a 64-pixel-pitch
+             * buffer (the menubar patch): buffer after the draw + state. */
+            {
+                static const char *mbp;
+                static int mbi;
+                static unsigned mbn;
+                static FILE *mbl;
+                if (!mbi) {
+                    mbi = 1;
+                    mbp = getenv("R300_MBDUMP");
+                    if (mbp) {
+                        char lp[300];
+                        snprintf(lp, sizeof(lp), "%s.txt", mbp);
+                        mbl = fopen(lp, "w");
+                    }
+                }
+                if (mbl && pkt.rt_pitch == 64 && mbn < 600 && s->renderer->flush_r200) {
+                    char path[300];
+                    FILE *f;
+                    s->renderer->flush_r200(s->renderer_opaque);
+                    snprintf(path, sizeof(path), "%s.%04u.bin", mbp, mbn);
+                    if ((f = fopen(path, "wb"))) {
+                        fwrite(vram + pkt.rt_gpu_addr, 1,
+                               (size_t)pkt.rt_pitch * pkt.rt_bpp * pkt.rt_height, f);
+                        fclose(f);
+                    }
+                    fprintf(mbl, "M%04u D%llu rt %06x h %u bpp %u sc %u,%u-%u,%u nv %u vecs %u vs %d "
+                            "t0 %d %06x %ux%u kind %u dec %u cb %08x\n", mbn,
+                            (unsigned long long)s->r3->draws, pkt.rt_gpu_addr, pkt.rt_height,
+                            pkt.rt_bpp, pkt.scissor[0], pkt.scissor[1], pkt.scissor[2],
+                            pkt.scissor[3], pkt.num_verts, pkt.vs_in_vecs, pkt.vs_glsl != NULL,
+                            pkt.tex[0].bound, pkt.tex[0].gpu_addr, pkt.tex[0].width,
+                            pkt.tex[0].height, pkt.tex[0].kind, pkt.uniforms.tex_info[0][1],
+                            r300_reg(s->r3, 0x4E04));
+                    for (uint32_t v = 0; pkt.vs_in && v < pkt.vs_in_vecs && v < 48; v++) {
+                        fprintf(mbl, "  in%02u %g %g %g %g\n", v, pkt.vs_in[v][0],
+                                pkt.vs_in[v][1], pkt.vs_in[v][2], pkt.vs_in[v][3]);
+                    }
+                    for (uint32_t v = 0; pkt.vs_idx && v < pkt.num_verts && v < 12; v++) {
+                        fprintf(mbl, "  idx %u\n", pkt.vs_idx[v]);
+                    }
+                    fflush(mbl);
+                    mbn++;
+                }
+            }
             /*
              * Debug ($R300_DUMP): after a present that samples an
              * off-screen buffer X (a drag frame), save X after each of the
