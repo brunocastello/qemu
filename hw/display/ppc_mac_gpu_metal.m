@@ -9519,6 +9519,30 @@ static int r300_draw_encode(PPCMacGPUMetalState *st, uint8_t *vram_ptr,
                              U->tex_swz[t][2], U->tex_swz[t][3]);
                 }
             }
+            if (pkt->verts && pkt->num_verts <= 6) {
+                for (uint32_t vi = 0; vi < pkt->num_verts; vi++) {
+                    const R300Vertex *V = &pkt->verts[vi];
+                    qemu_log(" V%u=(%.1f,%.1f,%.2f,%.2f|%.3f,%.3f,%.3f,%.3f|%.3f,%.3f,%.3f,%.3f)", vi,
+                             V->pos[0], V->pos[1], V->pos[2], V->pos[3],
+                             V->v[0][0], V->v[0][1], V->v[0][2], V->v[0][3],
+                             V->v[1][0], V->v[1][1], V->v[1][2], V->v[1][3]);
+                }
+            } else if (pkt->vs_glsl && pkt->vs_in && pkt->vs_idx && pkt->num_verts <= 6) {
+                uint32_t per = pkt->vs_u ? pkt->vs_u->info[0] : 1;
+                per = per ? (per > 4 ? 4 : per) : 1;
+                uint32_t stride = pkt->vs_u && pkt->vs_u->info[0] ? pkt->vs_u->info[0] : 1;
+                for (uint32_t vi = 0; vi < pkt->num_verts; vi++) {
+                    uint64_t base = (uint64_t)pkt->vs_idx[vi] * stride;
+                    if (base + per > pkt->vs_in_vecs) {
+                        break;
+                    }
+                    qemu_log(" I%u=", vi);
+                    for (uint32_t k = 0; k < per; k++) {
+                        const float *q = pkt->vs_in[base + k];
+                        qemu_log("(%.2f,%.2f,%.2f,%.2f)", q[0], q[1], q[2], q[3]);
+                    }
+                }
+            }
             qemu_log(" cr=%x", U->clip_rule);
             for (int r = 0; r < 4; r++) {
                 qemu_log(" %d,%d-%d,%d", U->cliprect[r][0], U->cliprect[r][1],
