@@ -4843,6 +4843,16 @@ static void ppc_mac_gpu_2d_blit(PPCMacGPUState *s)
     uint8_t *vram = memory_region_get_ram_ptr(&s->vram);
     uint32_t bpp = gmc_dst_bpp(s->regs.dp_gui_master_cntl);
 
+    if (bpp == 1 && getenv("R300_BLIT8LOG")) {      /* DEBUG (r300-qgldbg4) */
+        static int n8;
+        if (n8++ < 4000) {
+            fprintf(stderr, "blit8 %s rop %02x srctype %u gmc %08x src %08x/%u %u,%u "
+                    "dst %08x/%u %u,%u %ux%u\n", "blit", rop3, src_type, gmc,
+                    src_offset, src_pitch, src_x, src_y, dst_offset, dst_pitch,
+                    dst_x, dst_y, blit_w, blit_h);
+        }
+    }
+
     gpu_debug_log("2D_BLIT rop=0x%02x src=0x%x+%u dst=0x%x+%u "
                   "sxy=%u,%u dxy=%u,%u %ux%u",
                   rop3, src_offset, src_pitch, dst_offset, dst_pitch,
@@ -5349,6 +5359,16 @@ static void ppc_mac_gpu_2d_blit_sep(PPCMacGPUState *s)
 
     uint8_t *vram = memory_region_get_ram_ptr(&s->vram);
     uint32_t bpp = gmc_dst_bpp(gmc);
+
+    if (bpp == 1 && getenv("R300_BLIT8LOG")) {      /* DEBUG (r300-qgldbg4) */
+        static int n8;
+        if (n8++ < 4000) {
+            fprintf(stderr, "blit8 %s rop %02x srctype %u gmc %08x src %08x/%u %u,%u "
+                    "dst %08x/%u %u,%u %ux%u\n", "sep", rop3, src_type, gmc,
+                    src_offset, src_pitch, src_x, src_y, dst_offset, dst_pitch,
+                    dst_x, dst_y, blit_w, blit_h);
+        }
+    }
 
     /* Check if source is in GART/AGP range (system RAM mapped into GPU) */
     bool src_is_gart = (s->regs.aic_ctrl & 1) &&
