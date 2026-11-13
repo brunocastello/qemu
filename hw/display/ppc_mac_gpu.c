@@ -531,7 +531,7 @@ static bool r200_async_submit(PPCMacGPUState *s, const uint32_t *d,
 /* Register-access flushes are tagged by register; others by a tag below. */
 #define R200_WHY_REG(a)   ((uint32_t)(a) / 4)
 #define R200_WHY_TAG(t)   (0x4000u + (t))
-enum { R200_WHY_T3 = 1, R200_WHY_DISPLAY, R200_WHY_FENCE, R200_WHY_OTHER, R200_WHY_IDLE };
+enum { R200_WHY_T3 = 1, R200_WHY_DISPLAY, R200_WHY_FENCE, R200_WHY_OTHER };
 
 static void ppc_mac_gpu_frame_ready(PPCMacGPUState *s);
 static void ppc_mac_gpu_hwc_define(PPCMacGPUState *s);
@@ -10159,24 +10159,6 @@ static uint64_t ppc_mac_gpu_mmio_read(void *opaque, hwaddr addr,
          * bits [30:7] = various pipeline busy flags
          * ATI kext checks GUI_ACTIVE to wait for idle */
         val = 64; /* 64 free entries, GUI_ACTIVE=0 (idle) */
-        /*
-         * Idle has to be true when the guest is told so.  A driver polls
-         * this before it touches VRAM with the CPU: Leopard's window
-         * server scrolls a window by moving its backing store that way.
-         * Drawing still batched for Metal would land after the move, so
-         * finish it first (a no-op when nothing is pending).
-         * PPCGPU_IDLE_FLUSH=0 reports idle without waiting, as before.
-         */
-        {
-            static int idle_flush = -1;
-            if (idle_flush < 0) {
-                const char *e = getenv("PPCGPU_IDLE_FLUSH");
-                idle_flush = !(e && e[0] == '0');
-            }
-            if (idle_flush) {
-                r200_flush_at(s, R200_WHY_TAG(R200_WHY_IDLE));
-            }
-        }
         gpu_debug_log("STATUS_RD RBBM_STATUS -> 0x%08x (idle, %u free)", val, val & 0x7f);
         {
             static int rbbm_read_count = 0;
