@@ -5436,11 +5436,13 @@ static void ppc_mac_gpu_2d_blit(PPCMacGPUState *s)
  * (0x10000000+ range) pointing to system RAM.
  */
 /*
- * A copy from VRAM into system memory through the GART or the AGP
- * aperture: how ATIRadeon9700 fills a surface's backing store.  VRAM holds
- * the CPU's view through the 32-bit swapping aperture (see the uploads in
- * gart_blit_rows); the card stores its own bytes through the destination
- * swap (0x15D0), so a swap of 2 is a plain copy.
+ * A copy into system memory through the GART or the AGP aperture: how
+ * ATIRadeon9700 fills a surface's backing store (from VRAM) and how the
+ * OpenGL driver fills vertex buffers (from a staging buffer that is itself
+ * in AGP memory: Doom 3's menu vertices).  VRAM holds the CPU's view
+ * through the 32-bit swapping aperture (see the uploads in gart_blit_rows),
+ * as system memory does; the card stores its own bytes through the
+ * destination swap (0x15D0), so a swap of 2 is a plain copy.
  */
 static unsigned g_r300_dst_swap = 2;
 static void ppc_mac_gpu_2d_blit_to_gart(PPCMacGPUState *s, uint32_t src_offset,
@@ -5456,9 +5458,11 @@ static void ppc_mac_gpu_2d_blit_to_gart(PPCMacGPUState *s, uint32_t src_offset,
     bool agp = !gart && agp_loc &&
                dst_offset >= ((agp_loc & 0xFFFF) << 16) &&
                dst_offset <= ((((agp_loc >> 16) & 0xFFFF) << 16) | 0xFFFF);
+    /* a source past VRAM is system memory too (GART or AGP) */
+    bool src_sys = src_offset >= s->vram_size;
     static uint32_t seen[16];
     static unsigned nseen;
-    uint32_t key = (g_r300_dst_swap << 28) ^ (s->r300_src_swap << 26) ^
+    uint32_t key = (src_sys << 31) ^ (g_r300_dst_swap << 28) ^ (s->r300_src_swap << 26) ^
                    (bpp << 20) ^ (gart << 19) ^ (agp << 18) ^ (dst_pitch & 0x3FFFF);
     unsigned k;
 
@@ -5466,17 +5470,20 @@ static void ppc_mac_gpu_2d_blit_to_gart(PPCMacGPUState *s, uint32_t src_offset,
     }
     if (k == nseen && nseen < ARRAY_SIZE(seen)) {
         seen[nseen++] = key;
-        qemu_log("ppc-mac-gpu: 2D copy VRAM %06x/%u -> %s %08x/%u %ux%u bpp %u "
-                 "swap src %u dst %u\n", src_offset, src_pitch,
+        qemu_log("ppc-mac-gpu: 2D copy %s %06x/%u -> %s %08x/%u %ux%u bpp %u "
+                 "swap src %u dst %u\n", src_sys ? "sysmem" : "VRAM", src_offset, src_pitch,
                  gart ? "GART" : agp ? "AGP" : "unmapped", dst_offset, dst_pitch,
                  w, h, bpp, s->r300_src_swap, g_r300_dst_swap);
     }
     if ((!gart && !agp) || (bpp != 4 && bpp != 2 && bpp != 1) ||
-        (uint64_t)src_offset + (uint64_t)(src_y + h) * src_pitch > s->vram_size) {
+        (!src_sys &&
+         (uint64_t)src_offset + (uint64_t)(src_y + h) * src_pitch > s->vram_size)) {
         return;
     }
     /* The GPU may still be drawing the source: finish that first. */
-    r200_vram_access(s, R200_ROWS(src_offset, src_pitch, src_y, h), false, 2);
+    if (!src_sys) {
+        r200_vram_access(s, R200_ROWS(src_offset, src_pitch, src_y, h), false, 2);
+    }
 
     AddressSpace *as = pci_get_address_space(&s->pci);
     const uint8_t *vram = memory_region_get_ram_ptr(&s->vram);
@@ -5484,8 +5491,24 @@ static void ppc_mac_gpu_2d_blit_to_gart(PPCMacGPUState *s, uint32_t src_offset,
     uint8_t *row = g_malloc(row_bytes);
 
     for (uint32_t y = 0; y < h; y++) {
-        memcpy(row, vram + src_offset + (uint64_t)(src_y + y) * src_pitch +
-               (uint64_t)src_x * bpp, row_bytes);
+        if (src_sys) {
+            uint32_t sg = src_offset + (src_y + y) * src_pitch + src_x * bpp;
+            for (size_t done = 0; done < row_bytes;) {
+                hwaddr phys;
+                bool ok = ppc_mac_gpu_agp_translate(s, sg + done, &phys) ||
+                          ppc_mac_gpu_gart_translate(s, sg + done, &phys);
+                size_t n = MIN(0x1000 - ((sg + done) & 0xFFF), row_bytes - done);
+                if (ok) {
+                    address_space_read(as, phys, MEMTXATTRS_UNSPECIFIED, row + done, n);
+                } else {
+                    memset(row + done, 0, n);
+                }
+                done += n;
+            }
+        } else {
+            memcpy(row, vram + src_offset + (uint64_t)(src_y + y) * src_pitch +
+                   (uint64_t)src_x * bpp, row_bytes);
+        }
         if (bpp == 4 && g_r300_dst_swap != 2) {
             for (size_t i = 0; i + 4 <= row_bytes; i += 4) {
                 stl_he_p(row + i, r300_swap_mode(bswap32(ldl_he_p(row + i)),
