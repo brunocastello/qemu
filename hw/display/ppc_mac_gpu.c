@@ -4238,6 +4238,49 @@ static bool host_data_put_narrow(PPCMacGPUState *s, uint8_t *vram, uint32_t val,
     return *cy < h;
 }
 
+static bool ppc_mac_gpu_gart_translate(PPCMacGPUState *s, uint32_t gpu_addr,
+                                       hwaddr *phys_out);
+static bool ppc_mac_gpu_agp_translate(PPCMacGPUState *s, uint32_t gpu_addr,
+                                      hwaddr *phys_out);
+static unsigned g_r300_dst_swap;
+
+/*
+ * 32bpp host data into system memory (GART or AGP): ATI's OpenGL driver
+ * uploads vertex buffers in AGP memory this way (Doom 3's menu).  The
+ * bytes are what the VRAM path stores, put through the destination swap as
+ * ppc_mac_gpu_2d_blit_to_gart does, so a swap of 2 lands the CPU's view.
+ */
+static void ppc_mac_gpu_host_data_write_sys(PPCMacGPUState *s, uint32_t val)
+{
+    uint32_t bpp = s->host_data_bpp ? s->host_data_bpp : 4;
+    uint32_t gpu = s->host_data_offset +
+                   (s->host_data_dst_y + s->host_data_cur_y) * s->host_data_pitch +
+                   (s->host_data_dst_x + s->host_data_cur_x) * bpp;
+    uint8_t b[4];
+    hwaddr phys;
+    static bool logged;
+
+    if (!logged) {
+        logged = true;
+        qemu_log("ppc-mac-gpu: host data into system memory at %08x/%u %ux%u bpp %u "
+                 "dst swap %u\n", s->host_data_offset, s->host_data_pitch,
+                 s->host_data_w, s->host_data_h, bpp, g_r300_dst_swap);
+    }
+    stl_he_p(b, g_r300_dst_swap != 2 ? r300_swap_mode(bswap32(val), g_r300_dst_swap) : val);
+    if (bpp == 4 &&
+        (ppc_mac_gpu_agp_translate(s, gpu, &phys) ||
+         ppc_mac_gpu_gart_translate(s, gpu, &phys))) {
+        address_space_write(pci_get_address_space(&s->pci), phys,
+                            MEMTXATTRS_UNSPECIFIED, b, 4);
+    }
+    if (++s->host_data_cur_x >= s->host_data_w) {
+        s->host_data_cur_x = 0;
+        if (++s->host_data_cur_y >= s->host_data_h) {
+            s->host_data_active = false;
+        }
+    }
+}
+
 static void ppc_mac_gpu_host_data_write(PPCMacGPUState *s, uint32_t val)
 {
     if (!s->host_data_active) {
@@ -4262,6 +4305,11 @@ static void ppc_mac_gpu_host_data_write(PPCMacGPUState *s, uint32_t val)
             s->host_data_active = false;
             s->display_invalid = true;
         }
+        return;
+    }
+
+    if (s->host_data_offset >= s->vram_size) {
+        ppc_mac_gpu_host_data_write_sys(s, val);
         return;
     }
 
@@ -5569,14 +5617,19 @@ static void ppc_mac_gpu_2d_blit_sep(PPCMacGPUState *s)
     if (blit_w == 0 || blit_h == 0 || dst_pitch == 0) {
         return;
     }
-    if (dst_offset >= s->vram_size) {
+    /* Into system memory: a copy, or host data (src_type 3, the OpenGL
+     * driver's vertex buffer uploads) that ppc_mac_gpu_host_data_write
+     * stores through the GART or the AGP aperture. */
+    if (dst_offset >= s->vram_size && src_type != 3) {
         ppc_mac_gpu_2d_blit_to_gart(s, src_offset, src_pitch ? src_pitch : dst_pitch,
                                     src_x, src_y, dst_offset, dst_pitch,
                                     dst_x, dst_y, blit_w, blit_h, gmc_dst_bpp(gmc));
         return;
     }
 
-    r200_vram_access(s, R200_ROWS(dst_offset, dst_pitch, dst_y, blit_h), true, 2);
+    if (dst_offset < s->vram_size) {
+        r200_vram_access(s, R200_ROWS(dst_offset, dst_pitch, dst_y, blit_h), true, 2);
+    }
     if (src_offset < s->vram_size) {
         r200_vram_access(s, R200_ROWS(src_offset, src_pitch ? src_pitch : dst_pitch,
                                       src_y, blit_h), false, 2);
