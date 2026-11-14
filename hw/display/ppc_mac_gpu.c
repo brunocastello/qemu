@@ -12074,6 +12074,48 @@ static void ppc_mac_gpu_mmio_write(void *opaque, hwaddr addr,
  * that need no ordering against it.  Type-0 ring packets call the inner
  * handlers directly.
  */
+/*
+ * $R300_REGLOG: log each (register, value) pair the guest reads or writes
+ * through MMIO the first time it is seen, with the draw count; at most 24
+ * distinct values per register and direction.  Debug only.
+ */
+static void reglog(PPCMacGPUState *s, bool wr, hwaddr addr, uint64_t val)
+{
+    static int on = -1;
+    static uint64_t seen[1 << 16];
+    static uint8_t nvals[2][0x10000 / 4];
+
+    if (on < 0) {
+        on = getenv("R300_REGLOG") != NULL;
+    }
+    if (!on || addr >= 0x10000) {
+        return;
+    }
+    unsigned r = (addr >> 2) & 0x3fff;
+    if (nvals[wr][r] >= 24) {
+        return;
+    }
+    uint64_t key = ((uint64_t)wr << 63) | ((uint64_t)addr << 32) | (uint32_t)val;
+    uint32_t h = (uint32_t)((key * 0x9E3779B97F4A7C15ull) >> 48);
+    while (seen[h] && seen[h] != key + 1) {
+        h = (h + 1) & 0xffff;
+    }
+    if (seen[h]) {
+        return;
+    }
+    seen[h] = key + 1;
+    if (++nvals[wr][r] == 24) {
+        qemu_log("reglog D%llu %s %04x: more than 24 values, no longer logged\n",
+                 s->r3 ? (unsigned long long)s->r3->draws : 0ull,
+                 wr ? "wr" : "rd", (unsigned)addr);
+        return;
+    }
+    qemu_log("reglog D%llu %s %04x %-22s = %08x\n",
+             s->r3 ? (unsigned long long)s->r3->draws : 0ull,
+             wr ? "wr" : "rd", (unsigned)addr, ppc_mac_gpu_reg_name(addr),
+             (uint32_t)val);
+}
+
 static uint64_t ppc_mac_gpu_mmio_read_guest(void *opaque, hwaddr addr,
                                             unsigned int size)
 {
@@ -12083,7 +12125,9 @@ static uint64_t ppc_mac_gpu_mmio_read_guest(void *opaque, hwaddr addr,
         !(addr >= PPC_MAC_GPU_HWC_BASE && addr < PPC_MAC_GPU_HWC_END)) {
         ppc_mac_gpu_cp_sync(s, addr);
     }
-    return ppc_mac_gpu_mmio_read(opaque, addr, size);
+    uint64_t v = ppc_mac_gpu_mmio_read(opaque, addr, size);
+    reglog(s, false, addr, v);
+    return v;
 }
 
 static void ppc_mac_gpu_mmio_write_guest(void *opaque, hwaddr addr,
@@ -12095,6 +12139,7 @@ static void ppc_mac_gpu_mmio_write_guest(void *opaque, hwaddr addr,
         !(addr >= PPC_MAC_GPU_HWC_BASE && addr < PPC_MAC_GPU_HWC_END)) {
         ppc_mac_gpu_cp_sync(s, addr);
     }
+    reglog(s, true, addr, val);
     ppc_mac_gpu_mmio_write(opaque, addr, val, size);
 }
 
