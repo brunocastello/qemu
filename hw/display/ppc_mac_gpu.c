@@ -3823,6 +3823,7 @@ static void ppc_mac_gpu_execute_ib(PPCMacGPUState *s,
                                     uint32_t ib_size_dw);
 static void ppc_mac_gpu_2d_blit(PPCMacGPUState *s);
 static void ppc_mac_gpu_2d_blit_sep(PPCMacGPUState *s);
+static unsigned g_r300_dst_swap;
 static void ppc_mac_gpu_mmio_write(void *opaque, hwaddr addr,
                                     uint64_t val, unsigned int size);
 
@@ -5434,6 +5435,79 @@ static void ppc_mac_gpu_2d_blit(PPCMacGPUState *s)
  * offscreen surfaces.  The source offset may be an AGP/GART GPU address
  * (0x10000000+ range) pointing to system RAM.
  */
+/*
+ * A copy from VRAM into system memory through the GART or the AGP
+ * aperture: how ATIRadeon9700 fills a surface's backing store.  VRAM holds
+ * the CPU's view through the 32-bit swapping aperture (see the uploads in
+ * gart_blit_rows); the card stores its own bytes through the destination
+ * swap (0x15D0), so a swap of 2 is a plain copy.
+ */
+static unsigned g_r300_dst_swap = 2;
+static void ppc_mac_gpu_2d_blit_to_gart(PPCMacGPUState *s, uint32_t src_offset,
+                                        uint32_t src_pitch, uint32_t src_x,
+                                        uint32_t src_y, uint32_t dst_offset,
+                                        uint32_t dst_pitch, uint32_t dst_x,
+                                        uint32_t dst_y, uint32_t w, uint32_t h,
+                                        uint32_t bpp)
+{
+    bool gart = (s->regs.aic_ctrl & 1) && dst_offset >= s->regs.aic_lo_addr &&
+                dst_offset <= s->regs.aic_hi_addr;
+    uint32_t agp_loc = s->regs.mc_agp_location;
+    bool agp = !gart && agp_loc &&
+               dst_offset >= ((agp_loc & 0xFFFF) << 16) &&
+               dst_offset <= ((((agp_loc >> 16) & 0xFFFF) << 16) | 0xFFFF);
+    static uint32_t seen[16];
+    static unsigned nseen;
+    uint32_t key = (g_r300_dst_swap << 28) ^ (s->r300_src_swap << 26) ^
+                   (bpp << 20) ^ (gart << 19) ^ (agp << 18) ^ (dst_pitch & 0x3FFFF);
+    unsigned k;
+
+    for (k = 0; k < nseen && seen[k] != key; k++) {
+    }
+    if (k == nseen && nseen < ARRAY_SIZE(seen)) {
+        seen[nseen++] = key;
+        qemu_log("ppc-mac-gpu: 2D copy VRAM %06x/%u -> %s %08x/%u %ux%u bpp %u "
+                 "swap src %u dst %u\n", src_offset, src_pitch,
+                 gart ? "GART" : agp ? "AGP" : "unmapped", dst_offset, dst_pitch,
+                 w, h, bpp, s->r300_src_swap, g_r300_dst_swap);
+    }
+    if ((!gart && !agp) || (bpp != 4 && bpp != 2 && bpp != 1) ||
+        (uint64_t)src_offset + (uint64_t)(src_y + h) * src_pitch > s->vram_size) {
+        return;
+    }
+    /* The GPU may still be drawing the source: finish that first. */
+    r200_vram_access(s, R200_ROWS(src_offset, src_pitch, src_y, h), false, 2);
+
+    AddressSpace *as = pci_get_address_space(&s->pci);
+    const uint8_t *vram = memory_region_get_ram_ptr(&s->vram);
+    size_t row_bytes = (size_t)w * bpp;
+    uint8_t *row = g_malloc(row_bytes);
+
+    for (uint32_t y = 0; y < h; y++) {
+        memcpy(row, vram + src_offset + (uint64_t)(src_y + y) * src_pitch +
+               (uint64_t)src_x * bpp, row_bytes);
+        if (bpp == 4 && g_r300_dst_swap != 2) {
+            for (size_t i = 0; i + 4 <= row_bytes; i += 4) {
+                stl_he_p(row + i, r300_swap_mode(bswap32(ldl_he_p(row + i)),
+                                                 g_r300_dst_swap));
+            }
+        }
+        uint32_t gpu = dst_offset + (dst_y + y) * dst_pitch + dst_x * bpp;
+        for (size_t done = 0; done < row_bytes;) {
+            hwaddr phys;
+            bool ok = gart ? ppc_mac_gpu_gart_translate(s, gpu + done, &phys)
+                           : ppc_mac_gpu_agp_translate(s, gpu + done, &phys);
+            size_t n = ok ? 0x1000 - (phys & 0xFFF) : 0x1000 - ((gpu + done) & 0xFFF);
+            n = MIN(n, row_bytes - done);
+            if (ok) {
+                address_space_write(as, phys, MEMTXATTRS_UNSPECIFIED, row + done, n);
+            }
+            done += n;
+        }
+    }
+    g_free(row);
+}
+
 static void ppc_mac_gpu_2d_blit_sep(PPCMacGPUState *s)
 {
     uint32_t src_offset = s->regs.src_offset;
@@ -5470,6 +5544,12 @@ static void ppc_mac_gpu_2d_blit_sep(PPCMacGPUState *s)
     uint32_t src_type = (gmc >> 24) & 0x7;
 
     if (blit_w == 0 || blit_h == 0 || dst_pitch == 0) {
+        return;
+    }
+    if (dst_offset >= s->vram_size) {
+        ppc_mac_gpu_2d_blit_to_gart(s, src_offset, src_pitch ? src_pitch : dst_pitch,
+                                    src_x, src_y, dst_offset, dst_pitch,
+                                    dst_x, dst_y, blit_w, blit_h, gmc_dst_bpp(gmc));
         return;
     }
 
@@ -11497,11 +11577,37 @@ static void ppc_mac_gpu_mmio_write(void *opaque, hwaddr addr,
         s->regs.dst_pitch = val;
         break;
     case R200_DST_WIDTH:
+        /*
+         * Writing DST_WIDTH starts a blit from the separate SRC_X/SRC_Y/
+         * DST_X/DST_Y/DST_HEIGHT registers.  ATIRadeon9700 copies a surface
+         * into its backing store in system memory this way
+         * (ATIR300Surface::write_2dblit_cmds_for_copy_buffer_using_DMA, the
+         * IOAccelerator read lock); without it every QuartzGL window's
+         * backing store stayed white, and HIToolbox reopened menus from
+         * that blank copy.
+         */
         s->regs.dst_width = val;
-        /* TODO: Phase 5 - trigger 2D blit when width is written */
+        s->regs.dst_width_height = ((val & 0x3FFF) << 16) |
+                                   (s->regs.dst_height & 0x3FFF);
+        if ((val & 0x3FFF) && (s->regs.dst_height & 0x3FFF) &&
+            s->regs.dst_pitch > 0) {
+            ppc_mac_gpu_2d_blit_sep(s);
+        }
         break;
     case R200_DST_HEIGHT:
         s->regs.dst_height = val;
+        break;
+    case 0x1414:                                    /* SRC_X */
+        s->regs.src_y_x = (s->regs.src_y_x & 0xFFFF0000) | (val & 0xFFFF);
+        break;
+    case 0x1418:                                    /* SRC_Y */
+        s->regs.src_y_x = (val << 16) | (s->regs.src_y_x & 0xFFFF);
+        break;
+    case 0x141C:                                    /* DST_X */
+        s->regs.dst_y_x = (s->regs.dst_y_x & 0xFFFF0000) | (val & 0xFFFF);
+        break;
+    case 0x1420:                                    /* DST_Y */
+        s->regs.dst_y_x = (val << 16) | (s->regs.dst_y_x & 0xFFFF);
         break;
     case R200_DST_HEIGHT_WIDTH: {
         /* Alternate blit trigger with h|w format */
@@ -12027,8 +12133,17 @@ static void ppc_mac_gpu_mmio_write(void *opaque, hwaddr addr,
             s->r300_src_swap = val & 3;
             break;
         }
-        /* Registers 0x15D0, 0x19E4 - kext writes, accept silently */
-        if (addr == 0x15D0 || addr == 0x19E4) {
+        /*
+         * 0x15D0: the swap the 2D engine applies when it writes to system
+         * memory (the same writer sets it for copies out of VRAM, see
+         * ppc_mac_gpu_2d_blit_to_gart).
+         */
+        if (addr == 0x15D0) {
+            g_r300_dst_swap = val & 3;
+            break;
+        }
+        /* Register 0x19E4 - kext writes, accept silently */
+        if (addr == 0x19E4) {
             break;
         }
 
