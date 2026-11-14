@@ -3371,12 +3371,7 @@ static void r300_render(PPCMacGPUState *s, uint32_t opcode, const uint32_t *d,
         }
         uint32_t ga = td->gpu_addr;
         if (r300_to_vram(s, &td->gpu_addr, tlen)) {
-            /* Only as the guest samples its own card-order layers: red
-             * from X (RGBA order).  CPU uploads read as ARGB (red from Z)
-             * that land where a layer was stay as they are, whatever
-             * write path we failed to see. */
             if (td->kind == R300_TEXK_RGBA8 && !(td->endian & 1) &&
-                pkt.uniforms.tex_swz[t][0] == 0 &&
                 r300_e0_has(s, td->gpu_addr)) {
                 pkt.uniforms.tex_info[t][1] ^= 1;
             }
