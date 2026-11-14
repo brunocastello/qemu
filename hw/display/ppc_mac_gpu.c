@@ -4692,14 +4692,16 @@ static bool blit_rect_untiled(PPCMacGPUState *s, uint8_t *vram,
  * source again 30 ms and 300 ms later and log whether it changed (the
  * guest still writing the image after the copy was made).  Debug only.
  */
-static struct {
+typedef struct {
     PPCMacGPUState *s;
     AddressSpace *as;
     bool gart;
     uint32_t src, pitch, w, h, h0;
     QEMUTimer *t;
     int stage;
-} gw;
+} GWSlot;
+static GWSlot gws[8];
+static unsigned gw_next;
 
 static uint32_t gw_hash(PPCMacGPUState *s, AddressSpace *as, bool gart,
                         uint32_t src, uint32_t pitch, uint32_t w, uint32_t h,
@@ -4736,12 +4738,13 @@ static uint32_t gw_hash(PPCMacGPUState *s, AddressSpace *as, bool gart,
 
 static void gw_tick(void *opaque)
 {
-    uint32_t nw, h = gw_hash(gw.s, gw.as, gw.gart, gw.src, gw.pitch, gw.w, gw.h, &nw);
+    GWSlot *g = opaque;
+    uint32_t nw, h = gw_hash(g->s, g->as, g->gart, g->src, g->pitch, g->w, g->h, &nw);
     qemu_log("gartwatch +%dms src=%08x %ux%u hash %08x -> %08x%s nonwhite=%u\n",
-             gw.stage ? 300 : 30, gw.src, gw.w, gw.h, gw.h0, h,
-             h == gw.h0 ? "" : " CHANGED", nw);
-    if (!gw.stage++) {
-        timer_mod(gw.t, qemu_clock_get_ms(QEMU_CLOCK_REALTIME) + 270);
+             g->stage ? 300 : 30, g->src, g->w, g->h, g->h0, h,
+             h == g->h0 ? "" : " CHANGED", nw);
+    if (!g->stage++) {
+        timer_mod(g->t, qemu_clock_get_ms(QEMU_CLOCK_REALTIME) + 270);
     }
 }
 
@@ -4757,14 +4760,19 @@ static void gw_arm(PPCMacGPUState *s, AddressSpace *as, bool gart, uint32_t src,
     if (!on || w * h < 40000) {
         return;
     }
-    if (!gw.t) {
-        gw.t = timer_new_ms(QEMU_CLOCK_REALTIME, gw_tick, NULL);
+    if (h < 100 || (w == 256 && h == 256)) {
+        return;                         /* menubar strips, font pages */
     }
-    gw = (typeof(gw)){ s, as, gart, src, pitch, w, h, 0, gw.t, 0 };
-    gw.h0 = gw_hash(s, as, gart, src, pitch, w, h, &nw);
+    GWSlot *g = &gws[gw_next++ % ARRAY_SIZE(gws)];
+    if (!g->t) {
+        g->t = timer_new_ms(QEMU_CLOCK_REALTIME, gw_tick, g);
+    }
+    QEMUTimer *t = g->t;
+    *g = (GWSlot){ s, as, gart, src, pitch, w, h, 0, t, 0 };
+    g->h0 = gw_hash(s, as, gart, src, pitch, w, h, &nw);
     qemu_log("gartwatch copy src=%08x %ux%u hash %08x nonwhite=%u\n",
-             src, w, h, gw.h0, nw);
-    timer_mod(gw.t, qemu_clock_get_ms(QEMU_CLOCK_REALTIME) + 30);
+             src, w, h, g->h0, nw);
+    timer_mod(g->t, qemu_clock_get_ms(QEMU_CLOCK_REALTIME) + 30);
 }
 
 static void gart_blit_rows(PPCMacGPUState *s, AddressSpace *as, bool gart,
