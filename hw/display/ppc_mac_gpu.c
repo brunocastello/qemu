@@ -3151,17 +3151,12 @@ static void r300_e0_note(uint32_t base, uint32_t size, bool e0)
 /* After the draw marked its colour buffer dirty: start watching the
  * record's range for CPU writes (off-screen only; the scanout keeps its
  * own dirty bits). */
-static bool r300_e0_on_screen(PPCMacGPUState *s, uint32_t base, uint32_t size)
+static void r300_e0_arm(PPCMacGPUState *s, uint32_t base, uint32_t size)
 {
     uint64_t fb0 = s->disp.offset;
     uint64_t fb1 = fb0 + (uint64_t)s->disp.stride * s->disp.height;
 
-    return base < fb1 && fb0 < (uint64_t)base + size;
-}
-
-static void r300_e0_arm(PPCMacGPUState *s, uint32_t base, uint32_t size)
-{
-    if (r300_e0_on_screen(s, base, size)) {
+    if (base < fb1 && fb0 < (uint64_t)base + size) {
         return;
     }
     for (int i = 0; i < R300_E0_RANGES; i++) {
@@ -3176,21 +3171,10 @@ static bool r300_e0_has(PPCMacGPUState *s, uint32_t addr)
 {
     for (int i = 0; i < R300_E0_RANGES; i++) {
         if (r300_e0[i].size && addr == r300_e0[i].base) {
-            uint32_t len = r300_e0[i].size;
-            /* Watched ranges only (see r300_e0_arm); reading the log
-             * clears it, which nothing else uses off-screen. */
-            if (s->renderer && !s->renderer->set_dirty_source &&
-                !r300_e0_on_screen(s, addr, len)) {
-                DirtyBitmapSnapshot *snap =
-                    memory_region_snapshot_and_clear_dirty(&s->vram, addr, len,
-                                                           DIRTY_MEMORY_VGA);
-                bool written = memory_region_snapshot_get_dirty(&s->vram, snap,
-                                                                addr, len);
-                g_free(snap);
-                if (written) {
-                    r300_e0[i].size = 0;    /* written since: CPU data now */
-                    return false;
-                }
+            if (memory_region_get_dirty(&s->vram, addr, r300_e0[i].size,
+                                        DIRTY_MEMORY_VGA)) {
+                r300_e0[i].size = 0;        /* written since: CPU data now */
+                return false;
             }
             return true;
         }
