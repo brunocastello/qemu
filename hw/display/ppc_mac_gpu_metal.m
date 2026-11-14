@@ -9353,9 +9353,44 @@ static id<MTLTexture> r300_texture_raw(PPCMacGPUMetalState *st, id<MTLDevice> de
 }
 
 /* The Metal texture for one R300 texture unit (see R300_TEXK_*). */
+/*
+ * A texture over the colour buffer the same draw writes.  QuartzGL scrolls
+ * a view (System Preferences' Desktop picture grid) by drawing the window's
+ * surface into itself, shifted: each fragment reads the old frame where the
+ * new one is being written.  The card's texture cache makes that a copy of
+ * the old frame; in Metal, sampling memory the same pass writes is
+ * undefined, and the view came out as stacked slivers of earlier frames.
+ * Sample a copy of the surface as it is before the draw instead: finish
+ * whatever is queued (it may still write the surface), then copy the texels
+ * into a texture of their own.  Not cached: the next draw changes them.
+ */
+static id<MTLTexture> r300_texture_snapshot(PPCMacGPUMetalState *st, id<MTLDevice> dev,
+                                            uint8_t *vram_ptr, const R300TexDesc *td,
+                                            MTLPixelFormat pf)
+{
+    r200_flush_locked(st);
+    MTLTextureDescriptor *d =
+        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:pf width:td->width
+                                                          height:td->height mipmapped:NO];
+    d.usage = MTLTextureUsageShaderRead;
+    d.storageMode = MTLStorageModeShared;
+    id<MTLTexture> t = [dev newTextureWithDescriptor:d];
+    if (!t) {
+        return nil;
+    }
+    uint32_t bpr;
+    uint8_t *bytes = r300_tex_level_bytes(td, vram_ptr + td->gpu_addr, 0,
+                                          td->width, td->height, &bpr);
+    [t replaceRegion:MTLRegionMake2D(0, 0, td->width, td->height)
+         mipmapLevel:0 withBytes:bytes bytesPerRow:bpr];
+    free(bytes);
+    return [t autorelease];
+}
+
 static id<MTLTexture> r300_texture(PPCMacGPUMetalState *st, id<MTLDevice> dev,
                                    uint8_t *vram_ptr, uint64_t vram_size,
-                                   const R300TexDesc *td, uint32_t *rowel)
+                                   const R300TexDesc *td, uint32_t *rowel,
+                                   bool feedback)
 {
     uint64_t lo = td->gpu_addr;
     uint64_t hi = lo + td->size_bytes;
@@ -9384,6 +9419,9 @@ static id<MTLTexture> r300_texture(PPCMacGPUMetalState *st, id<MTLDevice> dev,
          * them (r300_tex_level_bytes reorders them): uploaded through
          * the content-hash cache, so an unchanged texture costs a hash. */
         return r300_texture_full(st, dev, vram_ptr, td);
+    }
+    if (feedback && (td->kind == R300_TEXK_RGBA8 || td->kind == R300_TEXK_RG8)) {
+        return r300_texture_snapshot(st, dev, vram_ptr, td, pf);
     }
     if (pf != MTLPixelFormatInvalid) {
         /* Zero-copy view over VRAM. */
@@ -9575,7 +9613,15 @@ static int r300_draw_encode(PPCMacGPUMetalState *st, uint8_t *vram_ptr,
                 continue;
             }
             uint32_t rowel = u.tex_info[t][1];
-            id<MTLTexture> x = r300_texture(st, dev, vram_ptr, vram_size, td, &rowel);
+            /* Sampling a colour buffer this draw writes (see
+             * r300_texture_snapshot). */
+            bool feedback = false;
+            for (uint32_t k = 0; k < ncb && !td->host_data; k++) {
+                uint64_t lo = ck[k].offset, hi = lo + (uint64_t)ck[k].pitch * ck[k].height;
+                feedback |= td->gpu_addr < hi && lo < (uint64_t)td->gpu_addr + td->size_bytes;
+            }
+            id<MTLTexture> x = r300_texture(st, dev, vram_ptr, vram_size, td, &rowel,
+                                            feedback);
             if (!x) {
                 u.tex_info[t][0] = 0;
                 continue;
