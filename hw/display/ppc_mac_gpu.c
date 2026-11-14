@@ -4687,6 +4687,86 @@ static bool blit_rect_untiled(PPCMacGPUState *s, uint8_t *vram,
  * playback; this translates once per 4 KB page and moves whole runs.
  * The byte swaps match the per-pixel path in ppc_mac_gpu_2d_blit_sep.
  */
+/*
+ * $R300_GARTWATCH: after a large 32bpp upload from system memory, hash the
+ * source again 30 ms and 300 ms later and log whether it changed (the
+ * guest still writing the image after the copy was made).  Debug only.
+ */
+static struct {
+    PPCMacGPUState *s;
+    AddressSpace *as;
+    bool gart;
+    uint32_t src, pitch, w, h, h0;
+    QEMUTimer *t;
+    int stage;
+} gw;
+
+static uint32_t gw_hash(PPCMacGPUState *s, AddressSpace *as, bool gart,
+                        uint32_t src, uint32_t pitch, uint32_t w, uint32_t h,
+                        uint32_t *nonwhite)
+{
+    uint32_t hsh = 2166136261u, nw = 0;
+    uint8_t row[4096];
+
+    for (uint32_t y = 0; y < h; y++) {
+        uint32_t n = MIN(w * 4, (uint32_t)sizeof(row));
+        for (uint32_t done = 0; done < n;) {
+            hwaddr phys;
+            uint32_t a = src + y * pitch + done;
+            bool ok = gart ? ppc_mac_gpu_gart_translate(s, a, &phys)
+                           : ppc_mac_gpu_agp_translate(s, a, &phys);
+            uint32_t k = ok ? MIN(n - done, 0x1000 - (uint32_t)(phys & 0xFFF)) : 4;
+            k = MIN(k, n - done);
+            if (!ok || address_space_read(as, phys, MEMTXATTRS_UNSPECIFIED,
+                                          row + done, k) != MEMTX_OK) {
+                memset(row + done, 0, k);
+            }
+            done += k;
+        }
+        for (uint32_t i = 0; i < n; i++) {
+            hsh = (hsh ^ row[i]) * 16777619u;
+        }
+        for (uint32_t i = 0; i + 4 <= n; i += 4) {
+            nw += ldl_he_p(row + i) != 0xffffffffu;
+        }
+    }
+    *nonwhite = nw;
+    return hsh;
+}
+
+static void gw_tick(void *opaque)
+{
+    uint32_t nw, h = gw_hash(gw.s, gw.as, gw.gart, gw.src, gw.pitch, gw.w, gw.h, &nw);
+    qemu_log("gartwatch +%dms src=%08x %ux%u hash %08x -> %08x%s nonwhite=%u\n",
+             gw.stage ? 300 : 30, gw.src, gw.w, gw.h, gw.h0, h,
+             h == gw.h0 ? "" : " CHANGED", nw);
+    if (!gw.stage++) {
+        timer_mod(gw.t, qemu_clock_get_ms(QEMU_CLOCK_REALTIME) + 270);
+    }
+}
+
+static void gw_arm(PPCMacGPUState *s, AddressSpace *as, bool gart, uint32_t src,
+                   uint32_t pitch, uint32_t w, uint32_t h)
+{
+    static int on = -1;
+    uint32_t nw;
+
+    if (on < 0) {
+        on = getenv("R300_GARTWATCH") != NULL;
+    }
+    if (!on || w * h < 40000) {
+        return;
+    }
+    if (!gw.t) {
+        gw.t = timer_new_ms(QEMU_CLOCK_REALTIME, gw_tick, NULL);
+    }
+    gw = (typeof(gw)){ s, as, gart, src, pitch, w, h, 0, gw.t, 0 };
+    gw.h0 = gw_hash(s, as, gart, src, pitch, w, h, &nw);
+    qemu_log("gartwatch copy src=%08x %ux%u hash %08x nonwhite=%u\n",
+             src, w, h, gw.h0, nw);
+    timer_mod(gw.t, qemu_clock_get_ms(QEMU_CLOCK_REALTIME) + 30);
+}
+
 static void gart_blit_rows(PPCMacGPUState *s, AddressSpace *as, bool gart,
                            uint32_t src_offset, uint32_t src_pitch,
                            uint32_t src_x, uint32_t src_y, uint8_t *vram,
@@ -5617,6 +5697,10 @@ static void ppc_mac_gpu_2d_blit_sep(PPCMacGPUState *s)
                 gart_blit_rows(s, as, src_is_gart, src_offset, src_pitch,
                                src_x, src_y, vram, dst_offset, dst_pitch,
                                dst_x, dst_y, blit_w, blit_h, bpp);
+            }
+            if (bpp == 4) {
+                gw_arm(s, as, src_is_gart, src_offset + src_y * src_pitch + src_x * 4,
+                       src_pitch, blit_w, blit_h);
             }
 
             for (uint32_t row = 0; !fast && row < blit_h; row++) {
