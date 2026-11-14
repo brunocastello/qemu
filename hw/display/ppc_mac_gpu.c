@@ -3361,8 +3361,12 @@ static void r300_render(PPCMacGPUState *s, uint32_t opcode, const uint32_t *d,
             break;
         }
     }
+    /* Only layers written red first (US_OUT_FMT_0 C0_SEL = R, as the Dock
+     * and Core Image do): System Preferences also renders COLOR_ENDIAN 0
+     * layers with C0 = B, and those read right as they are. */
     r300_e0_note(pkt.rt_gpu_addr, pkt.rt_pitch * pkt.rt_bpp * pkt.rt_height * ns,
-                 pkt.rt_bpp == 4 && pkt.uniforms.rt_endian == 0);
+                 pkt.rt_bpp == 4 && pkt.uniforms.rt_endian == 0 &&
+                 ((r300_reg(s->r3, 0x46A4) >> 8) & 3) == 1);
     for (int t = 0; t < R300_NUM_TEX_UNITS; t++) {
         R300TexDesc *td = &pkt.tex[t];
         uint64_t tlen = td->size_bytes;     /* the whole mip chain */
