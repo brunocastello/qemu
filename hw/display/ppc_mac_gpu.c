@@ -3088,52 +3088,6 @@ static void r300_aa_resolve(PPCMacGPUState *s, const R300DrawPacket *pkt)
     }
 }
 
-/*
- * Colour buffers written with COLOR_ENDIAN 0 hold the card's own byte
- * order, while RGBA8 texture decode assumes the CPU's (reversed for no
- * TXO swap, see r300_draw.c).  Leopard's Dock renders its stack and
- * icon-flash layers that way (tiled, COLOR_ENDIAN 0, sampled back with
- * an R=X swizzle): read with the CPU's order, alpha landed in red and
- * the fades flashed red/pink.  Remember the VRAM ranges last rendered
- * like that and decode RGBA8 textures inside them the other way round.
- */
-#define R300_E0_RANGES 16
-static struct { uint32_t base, size; } r300_e0[R300_E0_RANGES];
-
-static void r300_e0_note(uint32_t base, uint32_t size, bool e0)
-{
-    int free_slot = -1;
-    for (int i = 0; i < R300_E0_RANGES; i++) {
-        if (r300_e0[i].size && r300_e0[i].base == base) {
-            if (e0) {
-                r300_e0[i].size = size;
-            } else {
-                r300_e0[i].size = 0;
-            }
-            return;
-        }
-        if (!r300_e0[i].size && free_slot < 0) {
-            free_slot = i;
-        }
-    }
-    if (e0) {
-        static unsigned next;
-        int i = free_slot >= 0 ? free_slot : (int)(next++ % R300_E0_RANGES);
-        r300_e0[i].base = base;
-        r300_e0[i].size = size;
-    }
-}
-
-static bool r300_e0_has(uint32_t addr)
-{
-    for (int i = 0; i < R300_E0_RANGES; i++) {
-        if (r300_e0[i].size && addr - r300_e0[i].base < r300_e0[i].size) {
-            return true;
-        }
-    }
-    return false;
-}
-
 static void r300_render(PPCMacGPUState *s, uint32_t opcode, const uint32_t *d,
                         uint32_t body_dw, const R300Indices *idx)
 {
@@ -3297,8 +3251,6 @@ static void r300_render(PPCMacGPUState *s, uint32_t opcode, const uint32_t *d,
             break;
         }
     }
-    r300_e0_note(pkt.rt_gpu_addr, pkt.rt_pitch * pkt.rt_bpp * pkt.rt_height * ns,
-                 pkt.rt_bpp == 4 && pkt.uniforms.rt_endian == 0);
     for (int t = 0; t < R300_NUM_TEX_UNITS; t++) {
         R300TexDesc *td = &pkt.tex[t];
         uint64_t tlen = td->size_bytes;     /* the whole mip chain */
@@ -3307,10 +3259,6 @@ static void r300_render(PPCMacGPUState *s, uint32_t opcode, const uint32_t *d,
         }
         uint32_t ga = td->gpu_addr;
         if (r300_to_vram(s, &td->gpu_addr, tlen)) {
-            if (td->kind == R300_TEXK_RGBA8 && !(td->endian & 1) &&
-                r300_e0_has(td->gpu_addr)) {
-                pkt.uniforms.tex_info[t][1] ^= 1;
-            }
             continue;
         }
         /* AGP/GART texture: copy the texels out of guest memory (freed
