@@ -8235,6 +8235,19 @@ static void ppc_mac_gpu_process_pm4(PPCMacGPUState *s,
                 body_dw += bbm_hdr_n;
                 opcode = 0x9b;
             }
+            /*
+             * CNTL_BITBLT (0x92): one rectangle, laid out like a
+             * CNTL_BITBLT_MULTI with a single (src X_Y, dst X_Y, W_H)
+             * triplet.  QuartzGL scrolls a view with it (System
+             * Preferences' Desktop picture grid: the window surface moved
+             * up 26 rows in place); dropped, only the newly exposed strip
+             * was drawn and the grid filled with slivers of earlier frames.
+             * It does not set the header that 0x1B continues from.
+             */
+            bool single_blt = opcode == 0x92;
+            if (single_blt) {
+                opcode = 0x9b;
+            }
             if (opcode == 0x9b && body_dw >= 4) {
                 /*
                  * CNTL_BITBLT_MULTI — screen-to-screen blt
@@ -8288,7 +8301,7 @@ static void ppc_mac_gpu_process_pm4(PPCMacGPUState *s,
                     bbm_clip_br = d[hdr_dw++];
                 }
 
-                if (hdr_dw <= ARRAY_SIZE(bbm_hdr)) {
+                if (!single_blt && hdr_dw <= ARRAY_SIZE(bbm_hdr)) {
                     memcpy(bbm_hdr, d, hdr_dw * 4);     /* for 0x1B */
                     bbm_hdr_n = hdr_dw;
                 }
@@ -9391,6 +9404,20 @@ static void ppc_mac_gpu_process_pm4(PPCMacGPUState *s,
                 }
 
             } else {
+                /*
+                 * Say once which packets are dropped: CNTL_BITBLT went
+                 * unnoticed for months because nothing here logged it.
+                 * 0x10 is NOP.
+                 */
+                static uint64_t t3_unhandled[4];
+                if (opcode != 0x10 &&
+                    !(t3_unhandled[opcode >> 6] & (1ull << (opcode & 63)))) {
+                    t3_unhandled[opcode >> 6] |= 1ull << (opcode & 63);
+                    qemu_log("ppc-mac-gpu: type-3 packet 0x%02x (%u dwords) "
+                             "not handled, dropped: %08x %08x %08x\n", opcode,
+                             body_dw, body_dw > 0 ? d[0] : 0,
+                             body_dw > 1 ? d[1] : 0, body_dw > 2 ? d[2] : 0);
+                }
                 /* Log other Type 3 opcodes for analysis */
                 trace_ppc_mac_gpu_3d_cmd(opcode, body_dw);
                 uint32_t log_count = body_dw < 8 ? body_dw : 8;
