@@ -2861,6 +2861,33 @@ static void r300_drawlog_draw(PPCMacGPUState *s, uint32_t opcode,
                     r300_reg(r, 0x4540 + 4 * t), r300_reg(r, 0x4480 + 4 * t),
                     r300_reg(r, 0x44C0 + 4 * t), r300_reg(r, 0x4500 + 4 * t),
                     r300_reg(r, 0x4400 + 4 * t));
+            /* $R300_DRAWLOG_PIX: what the texels hold when the draw is
+             * parsed (32bpp assumed): a hash of the image, distinct
+             * values seen, and the centre texel. */
+            static int pix = -1;
+            if (pix < 0) {
+                pix = getenv("R300_DRAWLOG_PIX") != NULL;
+            }
+            uint32_t off = r300_reg(r, 0x4540 + 4 * t) & ~0x1fu;
+            uint32_t f0 = r300_reg(r, 0x4480 + 4 * t);
+            uint32_t w = (f0 & 0x7ff) + 1, h = ((f0 >> 11) & 0x7ff) + 1;
+            uint32_t pp = (r300_reg(r, 0x4500 + 4 * t) & 0x3fff) + 1;
+            if (pix && off < s->vram_size && pp >= w &&
+                (uint64_t)off + (uint64_t)pp * 4 * h <= s->vram_size &&
+                (uint64_t)w * h <= (1u << 20)) {
+                const uint32_t *v = (const uint32_t *)
+                    ((uint8_t *)memory_region_get_ram_ptr(&s->vram) + off);
+                uint32_t hsh = 2166136261u, first = v[0], diff = 0;
+                for (uint32_t y = 0; y < h; y++) {
+                    for (uint32_t x = 0; x < w; x++) {
+                        uint32_t px = v[(size_t)y * pp + x];
+                        hsh = (hsh ^ px) * 16777619u;
+                        diff += px != first;
+                    }
+                }
+                fprintf(f, " px=%08x/%u/%08x", hsh, diff,
+                        v[(size_t)(h / 2) * pp + w / 2]);
+            }
         }
     }
     fprintf(f, "\n");
