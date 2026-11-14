@@ -12251,6 +12251,102 @@ static void r300_permute(uint8_t b[4], unsigned mode)
     }
 }
 
+/*
+ * $R300_CPUWATCH=lo-hi (hex VRAM offsets): log the CPU's accesses to that
+ * range through both apertures, coalesced into runs, tagged with the
+ * draw count so they line up with $R300_DRAWLOG.  Debug only.
+ */
+static uint32_t cw_lo, cw_hi;
+static int cw_on = -1;
+static MemoryRegion cw_mr;
+static struct {
+    bool open, wr;
+    int ap;
+    uint32_t start, next, n, first, last;
+    uint64_t draw;
+} cw_run;
+static unsigned cw_lines;
+
+static void cw_flush(void)
+{
+    if (cw_run.open && cw_lines++ < 50000) {
+        qemu_log("cpuwatch D%llu ap%d %s %06x-%06x n=%u first=%08x last=%08x\n",
+                 (unsigned long long)cw_run.draw, cw_run.ap,
+                 cw_run.wr ? "wr" : "rd", cw_run.start, cw_run.next,
+                 cw_run.n, cw_run.first, cw_run.last);
+    }
+    cw_run.open = false;
+}
+
+static void cw_note(PPCMacGPUState *s, int ap, bool wr, uint32_t off,
+                    unsigned size, uint32_t val)
+{
+    if (cw_on <= 0 || off < cw_lo || off > cw_hi) {
+        return;
+    }
+    uint64_t draw = s->r3 ? s->r3->draws : 0;
+    if (!cw_run.open || cw_run.wr != wr || cw_run.ap != ap ||
+        cw_run.draw != draw || off < cw_run.next || off > cw_run.next + 64) {
+        cw_flush();
+        cw_run = (typeof(cw_run)){ true, wr, ap, off, off, 0, val, val, draw };
+    }
+    cw_run.next = off + size;
+    cw_run.n++;
+    cw_run.last = val;
+}
+
+static uint64_t cw_read(void *opaque, hwaddr addr, unsigned size)
+{
+    PPCMacGPUState *s = opaque;
+    const uint8_t *p = (uint8_t *)memory_region_get_ram_ptr(&s->vram) + cw_lo + addr;
+    uint64_t v = 0;
+
+    for (unsigned i = 0; i < size; i++) {
+        v = (v << 8) | p[i];
+    }
+    cw_note(s, 0, false, cw_lo + addr, size, (uint32_t)v);
+    return v;
+}
+
+static void cw_write(void *opaque, hwaddr addr, uint64_t val, unsigned size)
+{
+    PPCMacGPUState *s = opaque;
+    uint8_t *p = (uint8_t *)memory_region_get_ram_ptr(&s->vram) + cw_lo + addr;
+
+    for (unsigned i = 0; i < size; i++) {
+        p[i] = val >> (8 * (size - 1 - i));
+    }
+    memory_region_set_dirty(&s->vram, cw_lo + addr, size);
+    cw_note(s, 0, true, cw_lo + addr, size, (uint32_t)val);
+}
+
+static const MemoryRegionOps cw_ops = {
+    .read = cw_read,
+    .write = cw_write,
+    .endianness = DEVICE_BIG_ENDIAN,
+    .valid = { .min_access_size = 1, .max_access_size = 8 },
+    .impl = { .min_access_size = 1, .max_access_size = 8 },
+};
+
+static void cw_setup(PPCMacGPUState *s, Object *obj)
+{
+    const char *e = getenv("R300_CPUWATCH");
+    unsigned long lo, hi;
+
+    cw_on = 0;
+    if (!e || sscanf(e, "%lx-%lx", &lo, &hi) != 2 || hi <= lo ||
+        hi >= s->vram_size) {
+        return;
+    }
+    cw_lo = lo;
+    cw_hi = hi;
+    memory_region_init_io(&cw_mr, obj, &cw_ops, s, "ppc-mac-gpu-cpuwatch",
+                          hi - lo + 1);
+    memory_region_add_subregion_overlap(&s->vram_bar, lo, &cw_mr, 11);
+    cw_on = 1;
+    qemu_log("cpuwatch: 0x%lx-0x%lx\n", lo, hi);
+}
+
 static void r300_ap1_note(PPCMacGPUState *s, hwaddr off, bool wr, unsigned m)
 {
     static int n;
@@ -12282,6 +12378,7 @@ static uint64_t r300_ap1_read(void *opaque, hwaddr addr, unsigned size)
         v = (v << 8) | b[(addr & 3) + i];
     }
     r300_ap1_note(s, addr, false, m);
+    cw_note(s, 1, false, base, size, (uint32_t)v);
     return v;
 }
 
@@ -12309,6 +12406,7 @@ static void r300_ap1_write(void *opaque, hwaddr addr, uint64_t val,
     memcpy(vram + base, b, 4);
     ppc_vram_dirty_e0(s, base, 4);
     r300_ap1_note(s, addr, true, m);
+    cw_note(s, 1, true, base, size, (uint32_t)val);
 }
 
 /* $R300_SURFWATCH: while SURFACE0 covers a range, trap aperture 0 over it
@@ -12773,6 +12871,7 @@ static void ppc_mac_gpu_realize(PCIDevice *dev, Error **errp)
         memory_region_init_io(&s->vram_ap1, obj, &r300_ap1_ops, s,
                               "ppc-mac-gpu-vram-ap1", s->vram_size);
         memory_region_add_subregion(&s->vram_bar, s->vram_size, &s->vram_ap1);
+        cw_setup(s, obj);
         pci_register_bar(dev, PPC_MAC_GPU_VRAM_BAR,
                          PCI_BASE_ADDRESS_MEM_PREFETCH, &s->vram_bar);
     } else {
