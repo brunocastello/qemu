@@ -8248,6 +8248,11 @@ static void ppc_mac_gpu_process_pm4(PPCMacGPUState *s,
             if (single_blt) {
                 opcode = 0x9b;
             }
+            /* CNTL_PAINT (0x91) is likewise a one-rectangle
+             * CNTL_PAINT_MULTI. */
+            if (opcode == 0x91) {
+                opcode = 0x9a;
+            }
             if (opcode == 0x9b && body_dw >= 4) {
                 /*
                  * CNTL_BITBLT_MULTI — screen-to-screen blt
