@@ -7391,6 +7391,9 @@ static void r200_note_written(uint64_t lo, uint64_t hi, const R200TexKey *key)
     }
     if (w < g_r200_nwritten) {
         g_r200_written[w].epoch = g_r200_epoch;       /* written again in this batch */
+        /* the R300 notes each draw's scissored rows: grow to cover them */
+        g_r200_written[w].lo = MIN(g_r200_written[w].lo, lo);
+        g_r200_written[w].hi = MAX(g_r200_written[w].hi, hi);
         return;
     }
     if (w == R200_MAX_WRITTEN) {
@@ -9565,7 +9568,14 @@ static int r300_draw_encode(PPCMacGPUMetalState *st, uint8_t *vram_ptr,
                 want_ds = false;
             }
         }
-        uint64_t dlo = dk.offset, dhi = dlo + (uint64_t)dk.pitch * dk.height;
+        /*
+         * The views are pkt->rt_height rows (one height per buffer, see
+         * r300_draw_build), but a draw only touches the rows above its
+         * scissor's bottom: hazards and written ranges use those, or a
+         * buffer's view reaching past its real end over textures would
+         * flush the batch at almost every draw.
+         */
+        uint64_t dlo = dk.offset, dhi = dlo + (uint64_t)dk.pitch * sy1;
 
         id<MTLTexture> tex[R300_NUM_TEX_UNITS];
         id<MTLSamplerState> smp[R300_NUM_TEX_UNITS];
@@ -9596,7 +9606,7 @@ static int r300_draw_encode(PPCMacGPUMetalState *st, uint8_t *vram_ptr,
                         (want_ds && (r200_batch_conflict(dlo, dhi, &dk) ||
                                      r300_read_conflict(dlo, dhi, &dk)));
         for (uint32_t k = 0; k < ncb && !conflict; k++) {
-            uint64_t lo = ck[k].offset, hi = lo + (uint64_t)ck[k].pitch * ck[k].height;
+            uint64_t lo = ck[k].offset, hi = lo + (uint64_t)ck[k].pitch * sy1;
             conflict = r200_batch_conflict(lo, hi, &ck[k]) || r300_read_conflict(lo, hi, &ck[k]);
         }
         for (int t = 0; t < R300_NUM_TEX_UNITS && !conflict; t++) {
@@ -9665,10 +9675,12 @@ static int r300_draw_encode(PPCMacGPUMetalState *st, uint8_t *vram_ptr,
             g_r300_enc_mine = true;
             r300_ec_reset();
             g_r200_stat_passes++;
-            for (uint32_t k = 0; k < ncb; k++) {
-                r200_note_written(ck[k].offset,
-                                  ck[k].offset + (uint64_t)ck[k].pitch * ck[k].height, &ck[k]);
-            }
+        }
+        for (uint32_t k = 0; k < ncb; k++) {
+            r200_note_written(ck[k].offset, ck[k].offset + (uint64_t)ck[k].pitch * sy1, &ck[k]);
+        }
+        if (want_ds && g_r200_enc_depth_off == dk.offset) {
+            r200_note_written(dlo, dhi, &dk);
         }
         enc_ds = g_r200_enc_depth_off != ~0u;
         MTLPixelFormat pass_zpf = !enc_ds ? MTLPixelFormatInvalid :
