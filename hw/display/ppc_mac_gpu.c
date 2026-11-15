@@ -1566,8 +1566,12 @@ static bool ppc_mac_gpu_update_display_mode(PPCMacGPUState *s)
 
     /* Check if mode changed */
     if (memcmp(&old, m, sizeof(old)) != 0) {
-        fprintf(stderr, "GPU MODE: %ux%u bpp=%u stride=%u offset=0x%x pitch_reg=0x%x crtc_gen=0x%x\n",
-                m->width, m->height, m->bpp, m->stride, m->offset, pitch, crtc_gen);
+        /* not for a page flip (only the offset moves): Doom 3 flips every frame */
+        if (old.width != m->width || old.height != m->height || old.bpp != m->bpp ||
+            old.stride != m->stride) {
+            fprintf(stderr, "GPU MODE: %ux%u bpp=%u stride=%u offset=0x%x pitch_reg=0x%x crtc_gen=0x%x\n",
+                    m->width, m->height, m->bpp, m->stride, m->offset, pitch, crtc_gen);
+        }
         if (old.stride != m->stride) {
             fprintf(stderr, "[STRIDE_CHANGE] update_display_mode: "
                     "%u -> %u (override=%s val=%u)\n",
