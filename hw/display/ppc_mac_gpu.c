@@ -4246,9 +4246,11 @@ static unsigned g_r300_dst_swap;
 
 /*
  * 32bpp host data into system memory (GART or AGP): ATI's OpenGL driver
- * uploads vertex buffers in AGP memory this way (Doom 3's menu).  The
- * bytes are what the VRAM path stores, put through the destination swap as
- * ppc_mac_gpu_2d_blit_to_gart does, so a swap of 2 lands the CPU's view.
+ * uploads vertex buffers in AGP memory this way (Doom 3's menu).  The card
+ * writes each dword little-endian after the destination swap (0x15D0), so
+ * with a swap of 2 the CPU's big-endian floats land as it wrote them; the
+ * VRAM path's byte order put them byte-reversed, and every vertex decoded
+ * as a denormal near zero.
  */
 static void ppc_mac_gpu_host_data_write_sys(PPCMacGPUState *s, uint32_t val)
 {
@@ -4266,7 +4268,7 @@ static void ppc_mac_gpu_host_data_write_sys(PPCMacGPUState *s, uint32_t val)
                  "dst swap %u\n", s->host_data_offset, s->host_data_pitch,
                  s->host_data_w, s->host_data_h, bpp, g_r300_dst_swap);
     }
-    stl_he_p(b, g_r300_dst_swap != 2 ? r300_swap_mode(bswap32(val), g_r300_dst_swap) : val);
+    stl_le_p(b, r300_swap_mode(val, g_r300_dst_swap));
     if (bpp == 4 &&
         (ppc_mac_gpu_agp_translate(s, gpu, &phys) ||
          ppc_mac_gpu_gart_translate(s, gpu, &phys))) {
