@@ -9649,6 +9649,26 @@ static void ppc_mac_gpu_process_pm4(PPCMacGPUState *s,
                              body_dw, body_dw > 0 ? d[0] : 0,
                              body_dw > 1 ? d[1] : 0, body_dw > 2 ? d[2] : 0);
                 }
+                /*
+                 * PPCGPU_T3_DUMP: whole body of the first 4 packets of each
+                 * unhandled opcode, to work out layouts (ATI VA driver 0x3A).
+                 */
+                static uint8_t t3_dumped[256];
+                if (opcode != 0x10 && t3_dumped[opcode] < 4 &&
+                    getenv("PPCGPU_T3_DUMP")) {
+                    t3_dumped[opcode]++;
+                    qemu_log("ppc-mac-gpu: T3DUMP op 0x%02x #%u hdr %08x "
+                             "(%u dw)\n", opcode, t3_dumped[opcode], hdr,
+                             body_dw);
+                    for (uint32_t l = 0; l < body_dw; l += 8) {
+                        GString *line = g_string_new(NULL);
+                        for (uint32_t k = l; k < body_dw && k < l + 8; k++) {
+                            g_string_append_printf(line, " %08x", d[k]);
+                        }
+                        qemu_log("  [%3u]%s\n", l, line->str);
+                        g_string_free(line, true);
+                    }
+                }
                 /* Log other Type 3 opcodes for analysis */
                 trace_ppc_mac_gpu_3d_cmd(opcode, body_dw);
                 uint32_t log_count = body_dw < 8 ? body_dw : 8;
