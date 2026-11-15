@@ -1443,7 +1443,8 @@ char *r300_us_to_glsl(const R300State *st, const R300FSDesc *desc,
         "}\n\n"
         "#else\n\n",
         us_prelude_vs,
-        ucp ? "out gl_PerVertex { vec4 gl_Position; float gl_ClipDistance[6]; };\n" : "",
+        ucp ? "out gl_PerVertex { vec4 gl_Position; float gl_ClipDistance[6]; };\ninvariant gl_Position;\n"
+              : "invariant gl_Position;\n",
         ucp ? "    for (int i = 0; i < 6; i++) gl_ClipDistance[i] = x.ucp[i];\n" : "");
 
     r300_sb_printf(&sb, "%s%s%s", us_prelude,

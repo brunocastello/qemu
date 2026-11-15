@@ -1372,7 +1372,8 @@ static const GpuVs *gpu_vs_get(const R300State *st, const R300PVSProgram *prog,
             "{\n"
             "    uint vb = uint(gl_VertexIndex) * vs.info.x;\n",
             r300_pvs_glsl_helpers,
-            clip ? "out gl_PerVertex { vec4 gl_Position; float gl_ClipDistance[6]; };\n" : "");
+            clip ? "out gl_PerVertex { vec4 gl_Position; float gl_ClipDistance[6]; };\ninvariant gl_Position;\n"
+              : "invariant gl_Position;\n");
         for (unsigned i = 0, slot = 0; i < R300_PVS_NUM_INPUTS; i++) {
             if (in_used & (1u << i)) {
                 r300_sb_printf(&sb, "    vec4 i%u = vin[vb + %uu];\n", i, slot++);

@@ -8877,6 +8877,11 @@ static id<MTLFunction> r300_function(id<MTLDevice> dev, NSString *glsl,
         MTLCompileOptions *opt = [[MTLCompileOptions alloc] init];
         if (stage == R300_STAGE_VS) {
             opt.mathMode = MTLMathModeSafe;
+            /* gl_Position is invariant: a depth pre-pass and the passes
+             * drawn over it with an EQUAL depth test (Doom 3's lights)
+             * must land on identical depths, which separately optimised
+             * shaders otherwise miss here and there (dotted surfaces). */
+            opt.preserveInvariance = YES;
         }
         lib = [dev newLibraryWithSource:@(msl) options:opt error:&err];
         [opt release];
