@@ -8414,6 +8414,55 @@ static void ppc_mac_gpu_process_pm4(PPCMacGPUState *s,
             if (single_blt) {
                 opcode = 0x9b;
             }
+            /*
+             * CNTL_HOSTDATA_BLT (0x94): ATI's OpenGL driver builds one with
+             * GMC 0x03CC30FA | datatype (host data, SRCCOPY, destination
+             * pitch/offset and clip fields, no brush).  The header is the
+             * GMC-selected fields of the 2D packets, then DST_Y_X,
+             * DST_HEIGHT_WIDTH and the data: rewritten into the layout the
+             * 0x9C handler below takes (GMC, DST_PITCH_OFFSET, DST_Y_X,
+             * DST_HEIGHT_WIDTH, data).  Not yet seen from a game: the first
+             * one is logged with its decoded geometry.
+             */
+            static uint32_t *hd_buf;
+            static uint32_t hd_cap;
+            if (opcode == 0x94 && body_dw >= 3) {
+                uint32_t gmc = d[0], h = 1, po;
+                uint32_t brush = (gmc >> 4) & 0xF, sdt = (gmc >> 12) & 3;
+                if (gmc & R200_GMC_SRC_PITCH_OFFSET_CNTL) {
+                    h++;
+                }
+                po = (gmc & R200_GMC_DST_PITCH_OFFSET_CNTL) ? d[h++]
+                                                            : s->regs.default_pitch_offset;
+                if (gmc & R200_GMC_SRC_CLIPPING) {
+                    h++;
+                }
+                if (gmc & R200_GMC_DST_CLIPPING) {
+                    h += 2;
+                }
+                h += brush == 13 ? 1 : brush < 2 ? 4 : 0;   /* solid / 8x8 mono */
+                h += sdt < 2 ? 2 : 0;                       /* mono source: FRGD, BKGD */
+                if (body_dw >= h + 2) {
+                    uint32_t n = 4 + body_dw - h - 2;
+                    static bool hd_logged;
+                    if (!hd_logged) {
+                        hd_logged = true;
+                        qemu_log("ppc-mac-gpu: HOSTDATA_BLT gmc %08x po %08x yx %08x hw %08x, "
+                                 "%u data dwords after a %u-dword header\n", gmc, po, d[h],
+                                 d[h + 1], body_dw - h - 2, h);
+                    }
+                    if (n > hd_cap) {
+                        hd_cap = n;
+                        hd_buf = g_renew(uint32_t, hd_buf, hd_cap);
+                    }
+                    hd_buf[0] = gmc;
+                    hd_buf[1] = po;
+                    memcpy(hd_buf + 2, d + h, (body_dw - h) * 4);
+                    d = hd_buf;
+                    body_dw = n;
+                    opcode = 0x9c;
+                }
+            }
             /* CNTL_PAINT (0x91) is likewise a one-rectangle
              * CNTL_PAINT_MULTI. */
             if (opcode == 0x91) {
