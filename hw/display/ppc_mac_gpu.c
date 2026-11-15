@@ -1377,6 +1377,17 @@ static void ppc_mac_gpu_vblank(void *opaque)
  * Display mode tracking
  * ======================================================================== */
 
+/* [STRIDE_CHANGE] traces fire on every desktop update; opt in with PPCGPU_STRIDE_DIAG. */
+static bool ppcgpu_stride_diag(void)
+{
+    static int on = -1;
+
+    if (on < 0) {
+        on = getenv("PPCGPU_STRIDE_DIAG") != NULL;
+    }
+    return on;
+}
+
 /*
  * Derive the current display mode from CRTC registers.
  * Returns true if the mode is valid and has changed.
@@ -1394,7 +1405,7 @@ static void r200_set_present_pitch(PPCMacGPUState *s, uint32_t dst_pitch)
     if (dst_pitch < min) {
         static int pitch_reject_log;
         if (pitch_reject_log < 10) {
-            fprintf(stderr, "[STRIDE_CHANGE] ignoring BLT pitch %u for "
+            if (ppcgpu_stride_diag()) fprintf(stderr, "[STRIDE_CHANGE] ignoring BLT pitch %u for "
                     "%ux%u@%u (needs %u)\n", dst_pitch, s->disp.width,
                     s->disp.height, s->disp.bpp, min);
             pitch_reject_log++;
@@ -1510,7 +1521,7 @@ static bool ppc_mac_gpu_update_display_mode(PPCMacGPUState *s)
         old.width != 0 && old.height != 0 &&
         (old.width != m->width || old.height != m->height ||
          old.bpp != m->bpp)) {
-        fprintf(stderr, "[STRIDE_CHANGE] mode change %ux%u->%ux%u: "
+        if (ppcgpu_stride_diag()) fprintf(stderr, "[STRIDE_CHANGE] mode change %ux%u->%ux%u: "
                 "clearing stride override (was %u)\n",
                 old.width, old.height, m->width, m->height,
                 s->disp_stride_override_value);
@@ -1530,7 +1541,7 @@ static bool ppc_mac_gpu_update_display_mode(PPCMacGPUState *s)
         if (m->stride != s->disp_stride_override_value) {
             static int stride_override_log = 0;
             if (stride_override_log < 20) {
-                fprintf(stderr, "[STRIDE_CHANGE] update_display_mode: "
+                if (ppcgpu_stride_diag()) fprintf(stderr, "[STRIDE_CHANGE] update_display_mode: "
                         "CRTC gives %u, override forces %u\n",
                         m->stride, s->disp_stride_override_value);
                 stride_override_log++;
@@ -1545,7 +1556,7 @@ static bool ppc_mac_gpu_update_display_mode(PPCMacGPUState *s)
      * run past its end.  Keep the display consistent instead.
      */
     if (m->stride < m->width * ((m->bpp + 7) / 8)) {
-        fprintf(stderr, "[STRIDE_CHANGE] stride %u too small for %ux%u@%u, "
+        if (ppcgpu_stride_diag()) fprintf(stderr, "[STRIDE_CHANGE] stride %u too small for %ux%u@%u, "
                 "using %u\n", m->stride, m->width, m->height, m->bpp,
                 m->width * ((m->bpp + 7) / 8));
         m->stride = m->width * ((m->bpp + 7) / 8);
@@ -1573,7 +1584,7 @@ static bool ppc_mac_gpu_update_display_mode(PPCMacGPUState *s)
                     m->width, m->height, m->bpp, m->stride, m->offset, pitch, crtc_gen);
         }
         if (old.stride != m->stride) {
-            fprintf(stderr, "[STRIDE_CHANGE] update_display_mode: "
+            if (ppcgpu_stride_diag()) fprintf(stderr, "[STRIDE_CHANGE] update_display_mode: "
                     "%u -> %u (override=%s val=%u)\n",
                     old.stride, m->stride,
                     s->disp_stride_override_active ? "yes" : "no",
@@ -5170,7 +5181,7 @@ static void ppc_mac_gpu_2d_blit(PPCMacGPUState *s)
                         !s->disp_stride_override_active) {
                         static int srt_so_log = 0;
                         if (srt_so_log < 20) {
-                            fprintf(stderr,
+                            if (ppcgpu_stride_diag()) fprintf(stderr,
                                 "[STRIDE_CHANGE] MMIO_SRT: "
                                 "override %s %u -> %u\n",
                                 s->disp_stride_override_active
@@ -5416,7 +5427,7 @@ static void ppc_mac_gpu_2d_blit(PPCMacGPUState *s)
                 !s->disp_stride_override_active) {
                 static int mmio_nosrt_so = 0;
                 if (mmio_nosrt_so < 20) {
-                    fprintf(stderr,
+                    if (ppcgpu_stride_diag()) fprintf(stderr,
                         "[STRIDE_CHANGE] MMIO_NOSRT: "
                         "override %s %u -> %u\n",
                         s->disp_stride_override_active
@@ -5934,7 +5945,7 @@ static void ppc_mac_gpu_2d_blit_sep(PPCMacGPUState *s)
                 s->disp_stride_override_value != dst_pitch) {
                 static int mmio_so_log = 0;
                 if (mmio_so_log < 20) {
-                    fprintf(stderr,
+                    if (ppcgpu_stride_diag()) fprintf(stderr,
                         "[STRIDE_CHANGE] MMIO_2D: "
                         "override %s %u -> %u\n",
                         s->disp_stride_override_active
@@ -9005,7 +9016,7 @@ static void ppc_mac_gpu_process_pm4(PPCMacGPUState *s,
                                     s->disp_stride_override_value != dst_pitch) {
                                     static int so_log = 0;
                                     if (so_log < 20) {
-                                        fprintf(stderr,
+                                        if (ppcgpu_stride_diag()) fprintf(stderr,
                                             "[STRIDE_CHANGE] PM4_BBM: "
                                             "override %s %u -> %u\n",
                                             s->disp_stride_override_active
