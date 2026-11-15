@@ -8515,7 +8515,7 @@ static void ppc_mac_gpu_process_pm4(PPCMacGPUState *s,
                 {
                     static int bbm_log = 0;
                     if (bbm_log < 200) {
-                        FILE *f = fopen("/tmp/gpu_blit_diag.txt", "a");
+                        FILE *f = getenv("PPCGPU_BLIT_DIAG") ? fopen("/tmp/gpu_blit_diag.txt", "a") : NULL;
                         if (f) {
                             /* Raw PM4 dwords */
                             fprintf(f, "\n=== BBM[%d] ===\n", bbm_log);
@@ -9061,7 +9061,7 @@ static void ppc_mac_gpu_process_pm4(PPCMacGPUState *s,
                 {
                     static int paint_log = 0;
                     if (paint_log < 50) {
-                        FILE *f2 = fopen("/tmp/gpu_blit_diag.txt", "a");
+                        FILE *f2 = getenv("PPCGPU_BLIT_DIAG") ? fopen("/tmp/gpu_blit_diag.txt", "a") : NULL;
                         if (f2) {
                             fprintf(f2, "\n=== PAINT[%d] gmc=0x%08x rop=0x%02x "
                                     "has_po=%d brush=0x%x "
