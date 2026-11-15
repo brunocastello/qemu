@@ -3349,11 +3349,11 @@ static void r300_render(PPCMacGPUState *s, uint32_t opcode, const uint32_t *d,
         if (on) {
             char key[120];
             uint32_t zb = r300_reg(s->r3, 0x4F00), zs = r300_reg(s->r3, 0x4F04);
-            snprintf(key, sizeof(key), "%s zen%u zw%u zf%u sten%u cm%x cb%08x vte%03x",
+            snprintf(key, sizeof(key), "%s op%02x prim%x zb%x zs%08x cm%x cb%08x cull%x",
                      pkt.vs_glsl ? "GPU" : r300_cpu_vs_reason ? r300_cpu_vs_reason : "cpu",
-                     (zb >> 1) & 1, (zb >> 2) & 1, zs & 7, zb & 1,
+                     opcode, (body_dw ? d[0] : 0) & 0xF, zb & 0x1F, zs,
                      r300_reg(s->r3, 0x4E0C) & 0xF, r300_reg(s->r3, 0x4E04),
-                     r300_reg(s->r3, 0x20B0) & 0xFFF);
+                     r300_reg(s->r3, 0x42B8));
             unsigned k;
             for (k = 0; k < ntab && strcmp(tab[k].key, key); k++) {
             }
@@ -3367,6 +3367,9 @@ static void r300_render(PPCMacGPUState *s, uint32_t opcode, const uint32_t *d,
                 fprintf(stderr, "PATHSTAT at draw %llu:\n", (unsigned long long)s->r3->draws);
                 for (k = 0; k < ntab; k++) {
                     fprintf(stderr, "  %6u %s\n", tab[k].n, tab[k].key);
+                }
+                for (k = 0; k < ntab; k++) {
+                    tab[k].n = 0;
                 }
                 ntab = 0;
             }
