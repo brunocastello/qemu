@@ -3336,6 +3336,42 @@ static void r300_render(PPCMacGPUState *s, uint32_t opcode, const uint32_t *d,
         }
         return;
     }
+    {
+        /* debug $R300_PATHSTAT: per 3000 draws, counts of (vertex path,
+         * Z enable/func, stencil enable, colour mask, blend) */
+        extern const char *r300_cpu_vs_reason;
+        static int on = -1;
+        static struct { char key[120]; unsigned n; } tab[64];
+        static unsigned ntab, total;
+        if (on < 0) {
+            on = getenv("R300_PATHSTAT") != NULL;
+        }
+        if (on) {
+            char key[120];
+            uint32_t zb = r300_reg(s->r3, 0x4F00), zs = r300_reg(s->r3, 0x4F04);
+            snprintf(key, sizeof(key), "%s zen%u zw%u zf%u sten%u cm%x cb%08x vte%03x",
+                     pkt.vs_glsl ? "GPU" : r300_cpu_vs_reason ? r300_cpu_vs_reason : "cpu",
+                     (zb >> 1) & 1, (zb >> 2) & 1, zs & 7, zb & 1,
+                     r300_reg(s->r3, 0x4E0C) & 0xF, r300_reg(s->r3, 0x4E04),
+                     r300_reg(s->r3, 0x20B0) & 0xFFF);
+            unsigned k;
+            for (k = 0; k < ntab && strcmp(tab[k].key, key); k++) {
+            }
+            if (k == ntab && ntab < ARRAY_SIZE(tab)) {
+                snprintf(tab[ntab++].key, sizeof(tab[0].key), "%s", key);
+            }
+            if (k < ntab) {
+                tab[k].n++;
+            }
+            if (++total % 3000 == 0) {
+                fprintf(stderr, "PATHSTAT at draw %llu:\n", (unsigned long long)s->r3->draws);
+                for (k = 0; k < ntab; k++) {
+                    fprintf(stderr, "  %6u %s\n", tab[k].n, tab[k].key);
+                }
+                ntab = 0;
+            }
+        }
+    }
     if (pkt.warn & R300_WARN_PVS)      r300_warn_once("vertex program uses unimplemented features", NULL);
     if (pkt.warn & R300_WARN_DEPTH)    r300_warn_once("depth format 13E3 or reserved: treated as integer Z", NULL);
     if (pkt.warn & R300_WARN_TEXFMT)   r300_warn_once("texture format not implemented yet", NULL);

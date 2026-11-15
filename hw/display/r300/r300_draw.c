@@ -1401,6 +1401,8 @@ static const GpuVs *gpu_vs_get(const R300State *st, const R300PVSProgram *prog,
  * Returns false (pkt untouched) when the draw needs the CPU path;
  * *failed when fetching the vertices failed (the draw is dropped).
  */
+const char *r300_cpu_vs_reason;     /* debug: why the last draw ran on the CPU */
+
 static bool gpu_vs_build(const R300State *st, Fetch *f, const R300PVSProgram *prog,
                          const Layout *lay, const Route *route, uint32_t prim,
                          const uint32_t *order, uint32_t n, R300DrawPacket *pkt,
@@ -1411,10 +1413,12 @@ static bool gpu_vs_build(const R300State *st, Fetch *f, const R300PVSProgram *pr
     *failed = false;
     if ((r300_reg(st, GA_POLY_MODE) & 3) == 1 ||
         (r300_reg(st, VAP_OUTPUT_VTX_FMT_0) & (3u << 3))) {
+        r300_cpu_vs_reason = "polymode/twoside";
         return false;               /* polygon mode, two-sided colours */
     }
     for (int c = 0; c < 4; c++) {
         if (((colctl >> (4 * c)) & 3) != 2 || ((colctl >> (4 * c + 2)) & 3) != 2) {
+            r300_cpu_vs_reason = "flat/solid colour";
             return false;           /* flat or solid colours */
         }
     }
@@ -1422,10 +1426,12 @@ static bool gpu_vs_build(const R300State *st, Fetch *f, const R300PVSProgram *pr
     uint32_t cls, nidx = r300_assemble_prov(prim, n, list, &cls, NULL);
     if (!nidx || cls != 0) {
         free(list);
+        r300_cpu_vs_reason = "lines/points";
         return false;               /* lines and points: expanded on the CPU */
     }
     const GpuVs *vs = gpu_vs_get(st, prog, lay, route);
     if (!vs) {
+        r300_cpu_vs_reason = "no GPU VS";
         free(list);
         return false;
     }
@@ -1640,6 +1646,8 @@ static bool draw_core(const R300State *st, const R300Arrays *arr,
     bool rects = prim == 8;
     uint32_t nsrc = rects ? n / 3 * 4 : n;
 
+    r300_cpu_vs_reason = !(st->glsl_flags & R300_GLSL_GPU_VS) ? "flag off" :
+                         rects ? "rects" : bypass ? "bypass" : "?";
     if ((st->glsl_flags & R300_GLSL_GPU_VS) && !rects && !bypass) {
         bool failed;
         if (gpu_vs_build(st, &f, &prog, &lay, &route, prim, order, n, pkt,
