@@ -1589,7 +1589,37 @@ static bool draw_core(const R300State *st, const R300Arrays *arr,
     pkt->scissor[3] = (((br >> 13) & 0x1FFF) >= SC_COORD_BIAS) ?
                       ((br >> 13) & 0x1FFF) - SC_COORD_BIAS + 1 : 0;
     pkt->rt_width = pkt->rt_pitch;
-    pkt->rt_height = pkt->scissor[3];
+    /*
+     * The card has no colour buffer height; take the lowest scissor edge
+     * seen for this buffer.  The renderer maps pixels to clip space and
+     * back through this height, so it must not change from draw to draw:
+     * Doom 3 draws depth full screen and each light inside its own
+     * scissor, with an EQUAL depth test, and a per-scissor height rounded
+     * the light passes' depths differently -- unlit dots, rectangles and
+     * triangles.  (A buffer reused at the same address keeps the larger
+     * height, which only widens the area the renderer may touch.)
+     */
+    {
+        static struct { uint32_t addr, pitch, h; } seen[16];
+        static unsigned next;
+        unsigned k;
+        for (k = 0; k < 16; k++) {
+            if (seen[k].h && seen[k].addr == pkt->rt_gpu_addr &&
+                seen[k].pitch == pkt->rt_pitch) {
+                break;
+            }
+        }
+        if (k == 16) {
+            k = next++ & 15;
+            seen[k].addr = pkt->rt_gpu_addr;
+            seen[k].pitch = pkt->rt_pitch;
+            seen[k].h = 0;
+        }
+        if (pkt->scissor[3] > seen[k].h && pkt->scissor[3] <= 4096) {
+            seen[k].h = pkt->scissor[3];
+        }
+        pkt->rt_height = seen[k].h ? seen[k].h : pkt->scissor[3];
+    }
     if (!pkt->rt_width || !pkt->rt_height) {
         *err = "empty colour buffer";
         free(order);
