@@ -3687,15 +3687,19 @@ static bool ppc_mac_gpu_r300_packet3(PPCMacGPUState *s, uint32_t opcode,
         fprintf(s->r3_dump, "\n");
         fflush(s->r3_dump);
     }
-    if (s->r3->draws && s->r3_trace_lines < 40000) {
+    if (s->r3_dump && s->r3->draws && s->r3_trace_lines < 40000) {
         s->r3_trace_lines++;
-        fprintf(s->r3_dump ? s->r3_dump : stderr, "T3 %02x n=%u %08x %08x\n", opcode,
+        fprintf(s->r3_dump, "T3 %02x n=%u %08x %08x\n", opcode,
                 body_dw, body_dw ? d[0] : 0, body_dw > 1 ? d[1] : 0);
     }
-    if (!draw && r300_drawlog()) {
-        fprintf(r300_drawlog(), "P op%02x n=%u %08x %08x %08x %08x\n", opcode,
-                body_dw, body_dw ? d[0] : 0, body_dw > 1 ? d[1] : 0,
-                body_dw > 2 ? d[2] : 0, body_dw > 3 ? d[3] : 0);
+    if (!draw) {
+        /* one call: the log may close itself on reaching its cap */
+        FILE *dl = r300_drawlog();
+        if (dl) {
+            fprintf(dl, "P op%02x n=%u %08x %08x %08x %08x\n", opcode,
+                    body_dw, body_dw ? d[0] : 0, body_dw > 1 ? d[1] : 0,
+                    body_dw > 2 ? d[2] : 0, body_dw > 3 ? d[3] : 0);
+        }
     }
     if (opcode == 0x2F) {
         /* 3D_LOAD_VBPNTR loads the VAP_VTX_NUM_ARRAYS / AOS registers
