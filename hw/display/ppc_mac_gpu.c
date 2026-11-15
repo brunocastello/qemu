@@ -3357,6 +3357,25 @@ static void r300_render(PPCMacGPUState *s, uint32_t opcode, const uint32_t *d,
                 vinit = 1;
                 vpre = getenv("R300_VSDUMP");
             }
+            /* constants of the depth pass (ZB 0x17) and the EQUAL light
+             * passes (ZB 0x13) once the game runs: matrix rows 5-8, 14-17 */
+            static unsigned cdumps;
+            uint32_t zbv = r300_reg(s->r3, 0x4F00) & 0x1F;
+            if (vpre && pkt.vs_u && s->r3->draws > 40000 && cdumps < 80 &&
+                (zbv == 0x17 || zbv == 0x13)) {
+                cdumps++;
+                fprintf(stderr, "VSC draw %llu vs %u zb %02x vp1 %08x %08x |",
+                        (unsigned long long)s->r3->draws, pkt.vs_id, zbv,
+                        *(uint32_t *)&pkt.vs_u->vp1[0], *(uint32_t *)&pkt.vs_u->vp1[1]);
+                static const int rows[8] = { 5, 6, 7, 8, 14, 15, 16, 17 };
+                for (int r = 0; r < 8; r++) {
+                    fprintf(stderr, " c%d", rows[r]);
+                    for (int c = 0; c < 4; c++) {
+                        fprintf(stderr, " %08x", *(uint32_t *)&pkt.vs_u->c[rows[r]][c]);
+                    }
+                }
+                fprintf(stderr, "\n");
+            }
             if (vpre && pkt.vs_glsl && nseen < ARRAY_SIZE(seen)) {
                 unsigned k;
                 for (k = 0; k < nseen && seen[k] != pkt.vs_id; k++) {
