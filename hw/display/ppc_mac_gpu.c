@@ -2826,8 +2826,18 @@ static FILE *r300_drawlog(void)
     static int init;
     static unsigned lines;
 
+    /* $R300_DRAWLOG_ARM=path: start only once that file exists */
+    static const char *arm;
+    static unsigned armchk;
     if (!init) {
         const char *p = getenv("R300_DRAWLOG");
+        arm = getenv("R300_DRAWLOG_ARM");
+        if (arm && p && (++armchk & 255) == 0 && access(arm, F_OK) == 0) {
+            arm = NULL;
+        }
+        if (arm && p) {
+            return NULL;
+        }
         init = 1;
         f = p ? fopen(p, "w") : NULL;
     }
@@ -2859,6 +2869,7 @@ static void r300_drawlog_draw(PPCMacGPUState *s, uint32_t opcode,
             r300_reg(r, 0x4E0C), r300_reg(r, 0x4BD4), r300_reg(r, 0x4104),
             r300_reg(r, 0x4020), r300_reg(r, 0x4010), r300_reg(r, 0x4014),
             r300_reg(r, 0x4E88));
+    fprintf(f, " sc=%08x/%08x", r300_reg(r, 0x43E0), r300_reg(r, 0x43E4));
     for (int t = 0; t < 16; t++) {
         if (r300_reg(r, 0x4104) & (1u << t)) {
             fprintf(f, " t%d=%08x/%08x/%08x/%08x/%08x", t,
