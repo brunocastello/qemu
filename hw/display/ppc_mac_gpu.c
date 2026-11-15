@@ -3344,7 +3344,36 @@ static void r300_render(PPCMacGPUState *s, uint32_t opcode, const uint32_t *d,
         static struct { char key[120]; unsigned n; } tab[64];
         static unsigned ntab, total;
         if (on < 0) {
-            on = getenv("R300_PATHSTAT") != NULL;
+            on = getenv("R300_PATHSTAT") != NULL || getenv("R300_VSDUMP") != NULL;
+        }
+        /* debug $R300_VSDUMP=prefix: each new GPU vertex shader once, named
+         * by the depth/stencil state of its first draw */
+        {
+            static const char *vpre;
+            static int vinit;
+            static uint32_t seen[512];
+            static unsigned nseen;
+            if (!vinit) {
+                vinit = 1;
+                vpre = getenv("R300_VSDUMP");
+            }
+            if (vpre && pkt.vs_glsl && nseen < ARRAY_SIZE(seen)) {
+                unsigned k;
+                for (k = 0; k < nseen && seen[k] != pkt.vs_id; k++) {
+                }
+                if (k == nseen) {
+                    seen[nseen++] = pkt.vs_id;
+                    char *fn = g_strdup_printf("%s.vs%03u_zb%02x_zs%08x_cb%08x.glsl", vpre,
+                                               pkt.vs_id, r300_reg(s->r3, 0x4F00) & 0x1F,
+                                               r300_reg(s->r3, 0x4F04), r300_reg(s->r3, 0x4E04));
+                    FILE *vf = fopen(fn, "w");
+                    if (vf) {
+                        fputs(pkt.vs_glsl, vf);
+                        fclose(vf);
+                    }
+                    g_free(fn);
+                }
+            }
         }
         if (on) {
             char key[120];
