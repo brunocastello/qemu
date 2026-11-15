@@ -1,0 +1,24 @@
+name: VA test DVD
+on: push
+jobs:
+  dvd:
+    runs-on: ubuntu-latest
+    steps:
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg dvdauthor genisoimage
+      - name: MPEG-2 NTSC DVD (60 s moving test pattern + tone)
+        run: |
+          ffmpeg -hide_banner -loglevel error \
+            -f lavfi -i "testsrc2=size=720x480:rate=30000/1001:duration=60" \
+            -f lavfi -i "sine=frequency=440:duration=60:sample_rate=48000" \
+            -target ntsc-dvd -aspect 4:3 va-test.mpg
+          export VIDEO_FORMAT=NTSC
+          dvdauthor -o dvd -t va-test.mpg
+          dvdauthor -o dvd -T
+          genisoimage -quiet -dvd-video -V VA_TEST -o va-test-dvd.iso dvd
+          ls -la va-test-dvd.iso va-test.mpg dvd/VIDEO_TS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: va-test-dvd
+          path: |
+            va-test-dvd.iso
+            va-test.mpg
