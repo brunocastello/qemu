@@ -15,6 +15,7 @@ jobs:
           dvdauthor -o dvd -t va-test.mpg
           dvdauthor -o dvd -T
           genisoimage -quiet -dvd-video -V VA_TEST -o va-test-dvd.iso dvd
+          for t in 2 10 30; do ffmpeg -hide_banner -loglevel error -ss $t -i va-test.mpg -frames:v 1 ref-$t.png; done
           ls -la va-test-dvd.iso va-test.mpg dvd/VIDEO_TS
       - uses: actions/upload-artifact@v4
         with:
@@ -22,3 +23,4 @@ jobs:
           path: |
             va-test-dvd.iso
             va-test.mpg
+            ref-*.png
