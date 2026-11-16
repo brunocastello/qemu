@@ -427,9 +427,10 @@ static void us_emit_alu(R300Sb *sb, const R300State *st, unsigned i)
     case 6:  r300_sb_printf(sb, "        float ar = aC >= 0.0 ? aA : aB;\n"); break;
     case 7:  r300_sb_printf(sb, "        float ar = fract(aA);\n"); break;
     case 8:  r300_sb_printf(sb, "        float ar = exp2(aA);\n"); break;
-    case 9:  r300_sb_printf(sb, "        float ar = log2(aA);\n"); break;
+    /* LN2 and RSQ take |src| (R500 ISA; ARB_fp LG2/RSQ semantics) */
+    case 9:  r300_sb_printf(sb, "        float ar = log2(abs(aA));\n"); break;
     case 10: r300_sb_printf(sb, "        float ar = 1.0 / aA;\n"); break;
-    case 11: r300_sb_printf(sb, "        float ar = inversesqrt(aA);\n"); break;
+    case 11: r300_sb_printf(sb, "        float ar = inversesqrt(abs(aA));\n"); break;
     default: r300_sb_printf(sb, "        float ar = 0.0;\n"); break;
     }
     switch (rop) {
