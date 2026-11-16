@@ -13722,7 +13722,7 @@ static void ati_radeon_9000_class_init(ObjectClass *klass, void *data)
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     k->device_id = PPC_MAC_GPU_RV250_DEVICE_ID;
-    dc->desc = "ATI Radeon 9000 (Mac OS X 10.2)";
+    dc->desc = "ATI Radeon 9000";
 }
 
 static const TypeInfo ati_radeon_9000_type_info = {
