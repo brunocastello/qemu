@@ -3,6 +3,7 @@
  * controller on the host.
  *
  *   -device poweremu-gamepad,path=/tmp/x.sock
+ *   -device poweremu-gamepad,chardev=pad0   (UTM: a spiceport chardev)
  *
  * The host's controller -- an Xbox or PlayStation pad over Bluetooth, say
  * -- speaks a language Mac OS X 10.4 was never taught.  macOS understands
@@ -38,7 +39,9 @@
 #include "hw/usb/desc.h"
 #include "hw/usb/hid.h"
 #include "hw/qdev-properties.h"
+#include "hw/qdev-properties-system.h"
 #include "io/channel-socket.h"
+#include "chardev/char-fe.h"
 #include "qom/object.h"
 
 #define TYPE_POWEREMU_GAMEPAD "poweremu-gamepad"
@@ -49,6 +52,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(PowerEmuPad, POWEREMU_GAMEPAD)
 struct PowerEmuPad {
     USBDevice dev;
     char *path;
+    CharBackend chr;            /* instead of path: readings from a chardev */
 
     QIOChannelSocket *sioc;
     guint watch;
@@ -271,6 +275,62 @@ static void pad_try_connect(PowerEmuPad *p)
                                      pad_readable, p, NULL);
 }
 
+/*
+ * chardev= (UTM sends the same 9-byte readings over a SPICE port).  The
+ * reading in progress is dropped when the other end comes or goes, and the
+ * controls are let go when it goes, so nothing stays held.
+ */
+static void pad_release(PowerEmuPad *p)
+{
+    memset(p->report, 0, sizeof(p->report));
+    p->report[0] = p->report[1] = p->report[2] = p->report[3] = 128;
+    p->report[6] = 15;
+    p->changed = true;
+}
+
+static int pad_chr_can_read(void *opaque)
+{
+    PowerEmuPad *p = opaque;
+
+    return PAD_REPORT_LEN - p->in_len;
+}
+
+static void pad_chr_read(void *opaque, const uint8_t *buf, int size)
+{
+    PowerEmuPad *p = opaque;
+
+    while (size > 0) {
+        size_t n = MIN((size_t)size, PAD_REPORT_LEN - p->in_len);
+
+        memcpy(p->in + p->in_len, buf, n);
+        p->in_len += n;
+        buf += n;
+        size -= n;
+        if (p->in_len == PAD_REPORT_LEN) {
+            memcpy(p->report, p->in, PAD_REPORT_LEN);
+            p->in_len = 0;
+            p->changed = true;
+        }
+    }
+}
+
+static void pad_chr_event(void *opaque, QEMUChrEvent event)
+{
+    PowerEmuPad *p = opaque;
+
+    switch (event) {
+    case CHR_EVENT_OPENED:
+        p->in_len = 0;
+        break;
+    case CHR_EVENT_CLOSED:
+        p->in_len = 0;
+        pad_release(p);
+        break;
+    default:
+        break;
+    }
+}
+
 /* ---- the gamepad the guest sees ---- */
 
 static void pad_handle_reset(USBDevice *dev)
@@ -329,7 +389,7 @@ static void pad_handle_data(USBDevice *dev, USBPacket *pkt)
         pkt->status = USB_RET_STALL;
         return;
     }
-    if (!p->connected) {
+    if (!p->connected && p->path) {
         pad_try_connect(p);
     }
     /* Nothing has moved: say so, rather than repeat the last reading. */
@@ -346,8 +406,8 @@ static void pad_realize(USBDevice *dev, Error **errp)
 {
     PowerEmuPad *p = POWEREMU_GAMEPAD(dev);
 
-    if (!p->path) {
-        error_setg(errp, "poweremu-gamepad needs path=");
+    if (!p->path && !qemu_chr_fe_backend_connected(&p->chr)) {
+        error_setg(errp, "poweremu-gamepad needs path= or chardev=");
         return;
     }
     /*
@@ -359,7 +419,12 @@ static void pad_realize(USBDevice *dev, Error **errp)
     memcpy(p->descriptor, pad_report_descriptor, sizeof(pad_report_descriptor));
     p->descriptor[3] = p->usage;        /* Joystick or Game Pad */
     pad_handle_reset(dev);
-    pad_try_connect(p);                 /* and again later, if PowerEmu is slow */
+    if (qemu_chr_fe_backend_connected(&p->chr)) {
+        qemu_chr_fe_set_handlers(&p->chr, pad_chr_can_read, pad_chr_read,
+                                 pad_chr_event, NULL, p, NULL, true);
+    } else {
+        pad_try_connect(p);             /* and again later, if PowerEmu is slow */
+    }
 }
 
 static void pad_unrealize(USBDevice *dev)
@@ -374,10 +439,12 @@ static void pad_unrealize(USBDevice *dev)
         object_unref(OBJECT(p->sioc));
         p->sioc = NULL;
     }
+    qemu_chr_fe_deinit(&p->chr, false);
 }
 
 static const Property pad_properties[] = {
     DEFINE_PROP_STRING("path", PowerEmuPad, path),
+    DEFINE_PROP_CHR("chardev", PowerEmuPad, chr),
     DEFINE_PROP_UINT8("usage", PowerEmuPad, usage, 0x04),
 };
 
