@@ -845,6 +845,7 @@ struct PPCMacGPUState {
     uint32_t hwc_pix[64 * 64];
     uint32_t hwc_w, hwc_h, hwc_idx;
     bool host_aspect_modes;       /* EDID offers the patched NDRV's 1.545 modes */
+    bool gl_zero_copy;            /* GL display: show VRAM without a CPU copy */
     int32_t hwc_x, hwc_y;
     /* hotspot inside the image, from HWC reg 0x1C (0,0 with older NDRVs) */
     uint32_t hwc_hot_x, hwc_hot_y;

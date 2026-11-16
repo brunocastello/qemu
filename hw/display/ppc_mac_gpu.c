@@ -2058,6 +2058,16 @@ static void ppc_mac_gpu_display_update(void *opaque)
     }
 
     /*
+     * With a GL display (UTM) show VRAM itself, in the guest's byte order:
+     * the texture upload swizzles it (ui/console-gl.c), so no CPU copy.
+     * gl-zero-copy=off keeps the byte-swapped shadow copy.
+     */
+    bool zero_copy = s->gl_zero_copy && console_has_gl(s->con) &&
+                     s->disp.offset + frame_size <= s->vram_size;
+    uint8_t *surface_src = zero_copy ? vram_ptr + s->disp.offset
+                                     : (uint8_t *)s->shadow_buf;
+
+    /*
      * Create/replace the surface only when it would actually differ.
      *
      * display_invalid means "the contents changed", which a page flip or a
@@ -2070,18 +2080,19 @@ static void ppc_mac_gpu_display_update(void *opaque)
      */
     if (mode_changed || width != s->surface_width ||
         height != s->surface_height || stride != s->surface_stride ||
-        s->shadow_buf != s->surface_data) {
+        (void *)surface_src != s->surface_data) {
         s->display_invalid = false;
         s->surface_width = width;
         s->surface_height = height;
         s->surface_stride = stride;
-        s->surface_data = s->shadow_buf;
+        s->surface_data = surface_src;
         trace_ppc_mac_gpu_mode_change(width, height, s->disp.bpp, stride);
         DisplaySurface *ds = qemu_create_displaysurface_from(
             width, height,
-            PIXMAN_x8r8g8b8,   /* native LE — matches Cocoa's hardcoded LE */
+            /* the guest's A,R,G,B bytes, or the LE shadow copy */
+            zero_copy ? PIXMAN_BE_x8r8g8b8 : PIXMAN_x8r8g8b8,
             stride,
-            s->shadow_buf);
+            surface_src);
         dpy_gfx_replace_surface(s->con, ds);
     } else {
         s->display_invalid = false;
@@ -2237,7 +2248,7 @@ static void ppc_mac_gpu_display_update(void *opaque)
     if (y0 != 0 || y1 != (int)height) {
         r200_rate.co_partials++;
     }
-    for (y = y0; y < y1; y++) {
+    for (y = y0; y < y1 && !zero_copy; y++) {
         ppc_mac_gpu_bswap_line32(dst + y * stride_u32,
                                   src + y * stride_u32,
                                   width);
@@ -13470,6 +13481,7 @@ static void ppc_mac_gpu_exit(PCIDevice *dev)
 static const Property ppc_mac_gpu_properties[] = {
     DEFINE_PROP_UINT32("vgamem_mb", PPCMacGPUState, vram_size_mb, 128),
     DEFINE_PROP_BOOL("host-aspect-modes", PPCMacGPUState, host_aspect_modes, false),
+    DEFINE_PROP_BOOL("gl-zero-copy", PPCMacGPUState, gl_zero_copy, true),
     DEFINE_PROP_STRING("biosrom", PPCMacGPUState, biosrom),
     DEFINE_PROP_STRING("renderer", PPCMacGPUState, renderer_name),
 };
