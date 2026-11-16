@@ -664,6 +664,16 @@ static void set_textures(const R300State *st, R300DrawPacket *pkt)
         u->tex_swz[k][1] = (f1 >> 15) & 7;
         u->tex_swz[k][2] = (f1 >> 18) & 7;
         u->tex_swz[k][3] = (f1 >> 9) & 7;
+        /*
+         * YUV_TO_RGB: the card hands out the converted colour as is.  Leopard's
+         * DVD Player sets R = G = B = X here and gets colour on the real card;
+         * r300_yuv leaves B, G, R in X, Y, Z.
+         */
+        if ((f1 >> 22) & 1 && fmt >= 0x13 && fmt <= 0x15) {
+            u->tex_swz[k][0] = 2;
+            u->tex_swz[k][1] = 1;
+            u->tex_swz[k][2] = 0;
+        }
         if (!(enable & (1u << k))) {
             continue;
         }
