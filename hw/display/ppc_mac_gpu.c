@@ -4909,6 +4909,33 @@ static inline uint32_t mc_vram_read32(PPCMacGPUState *s, uint8_t *vram,
     return 0;
 }
 
+/*
+ * 2D features the blit paths do not implement.  Say once when a blit asks
+ * for one, instead of drawing it silently without (GMC bits as in the
+ * Radeon X driver: 28 CLR_CMP_CNTL_DIS, 29 AUX_CLIP_DIS, 30 WR_MSK_DIS).
+ */
+static void r200_note_2d_gaps(PPCMacGPUState *s, uint32_t gmc, const char *path)
+{
+    static bool said_cmp, said_aux, said_msk;
+
+    if (!(gmc & (1u << 28)) && !said_cmp) {
+        said_cmp = true;
+        qemu_log("ppc-mac-gpu 2d: %s blit with colour compare enabled "
+                 "(gmc %08x) - not implemented, drawn without it\n", path, gmc);
+    }
+    if (!(gmc & (1u << 29)) && !said_aux) {
+        said_aux = true;
+        qemu_log("ppc-mac-gpu 2d: %s blit with aux clipping enabled "
+                 "(gmc %08x) - not implemented, drawn without it\n", path, gmc);
+    }
+    if (!(gmc & (1u << 30)) && s->regs.dp_write_msk != 0xFFFFFFFFu && !said_msk) {
+        said_msk = true;
+        qemu_log("ppc-mac-gpu 2d: %s blit with write mask %08x (gmc %08x) "
+                 "- not implemented, all bits written\n", path,
+                 s->regs.dp_write_msk, gmc);
+    }
+}
+
 static void ppc_mac_gpu_2d_blit(PPCMacGPUState *s)
 {
     /*
@@ -4989,6 +5016,7 @@ static void ppc_mac_gpu_2d_blit(PPCMacGPUState *s)
     uint32_t gmc = s->regs.dp_gui_master_cntl;
     uint32_t rop3 = (gmc >> 16) & 0xFF;
     uint32_t src_type = (gmc >> 24) & 0x7; /* bits [26:24] = source type */
+    r200_note_2d_gaps(s, gmc, "MMIO");
 
     if (blit_w == 0 || blit_h == 0) {
         return;
@@ -5634,6 +5662,7 @@ static void ppc_mac_gpu_2d_blit_sep(PPCMacGPUState *s)
     uint32_t gmc = s->regs.dp_gui_master_cntl;
     uint32_t rop3 = (gmc >> 16) & 0xFF;
     uint32_t src_type = (gmc >> 24) & 0x7;
+    r200_note_2d_gaps(s, gmc, "MMIO separate-pitch");
 
     if (blit_w == 0 || blit_h == 0 || dst_pitch == 0) {
         return;
@@ -8501,6 +8530,7 @@ static void ppc_mac_gpu_process_pm4(PPCMacGPUState *s,
                 uint32_t rop3 = (gmc >> 16) & 0xFF;
 
                 uint32_t hdr_dw = 1;   /* d[0] = GMC */
+                r200_note_2d_gaps(s, gmc, "BITBLT_MULTI");
                 uint32_t src_po, dst_po;
 
                 /*
@@ -9054,6 +9084,7 @@ static void ppc_mac_gpu_process_pm4(PPCMacGPUState *s,
                 uint32_t gmc = d[0];
                 uint32_t rop3 = (gmc >> 16) & 0xFF;
                 bool has_po = (gmc >> 1) & 1;
+                r200_note_2d_gaps(s, gmc, "PAINT_MULTI");
                 uint32_t bpp = gmc_dst_bpp(gmc);
                 uint32_t idx = 1;
 
