@@ -5,7 +5,7 @@ name: Build qemu-system-x86_64 + PassthroughOpenGL host (macOS arm64, self-conta
 on:
   workflow_dispatch:
     inputs:
-      runner: { description: 'runner label', default: 'macos-15' }
+      runner: { description: 'runner label', default: 'xcode-27' }
   push:
     branches: [intel-vim]
 env:
@@ -13,7 +13,7 @@ env:
   VIM_COMMIT: 2861da9e265e557aef90319e4451487ed1fed553
 jobs:
   build:
-    runs-on: ${{ inputs.runner || 'macos-15' }}
+    runs-on: ${{ inputs.runner || 'xcode-27' }}
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 1 }
