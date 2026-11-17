@@ -30,6 +30,10 @@ jobs:
           git fetch -q --depth 1 --filter=blob:none origin "$VIM_COMMIT" && git checkout -q FETCH_HEAD
           # our in-process VRAM/RAM handoff (UTM's sandbox refuses bootstrap services)
           cp "$GITHUB_WORKSPACE/hw/display/vim-vram-memory.h" Source/vendor/qemu/hw/display/vim-vram-memory.h
+          # QEMU owns the display in-process (UTM's sandbox refuses the endpoint
+          # service); fail the build if the patch no longer applies to VIM_COMMIT
+          patch --dry-run -p1 < "$GITHUB_WORKSPACE/hw/display/vim-display-inprocess.patch"
+          patch -p1 < "$GITHUB_WORKSPACE/hw/display/vim-display-inprocess.patch"
           python3 Source/scripts/build-opengl-host.py --output "$GITHUB_WORKSPACE/hostlib"
           lipo -archs "$GITHUB_WORKSPACE/hostlib/libVIMPassthroughOpenGLHost.dylib"
       - name: Hybrid Hypervisor engine (libEngine.a)
