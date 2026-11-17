@@ -20,6 +20,7 @@
 #include "qemu/osdep.h"
 #include "qemu/main-loop.h"
 #include "accel/tcg/cpu-ops.h"
+#include "accel/tcg/handoff.h"
 #include "exec/exec-all.h"
 #include "exec/page-protection.h"
 #include "exec/memory.h"
@@ -1187,6 +1188,18 @@ void tlb_reset_dirty(CPUState *cpu, ram_addr_t start1, ram_addr_t length)
         unsigned int i;
         unsigned int n = tlb_n_entries(&cpu->neg.tlb.f[mmu_idx]);
 
+        /* No fill remains and no entry has entered the victim cache since
+         * the last complete flush. Occupancy alone is not sufficient once
+         * victim entries have been used. Avoid scanning untouched tables,
+         * including the unused modes of secondary CPUs during early boot.
+         * Only with the hybrid engine: VIM's change, kept out of the
+         * default path. */
+        if (unlikely(tcg_handoff) &&
+            cpu->neg.tlb.d[mmu_idx].n_used_entries == 0 &&
+            cpu->neg.tlb.d[mmu_idx].vindex == 0) {
+            continue;
+        }
+
         for (i = 0; i < n; i++) {
             tlb_reset_dirty_range_locked(&cpu->neg.tlb.f[mmu_idx].table[i],
                                          start1, length);
@@ -1600,6 +1613,9 @@ static void notdirty_write(CPUState *cpu, vaddr mem_vaddr, unsigned size,
     ram_addr_t ram_addr = mem_vaddr + full->xlat_section;
 
     trace_memory_notdirty_write_access(mem_vaddr, ram_addr, size);
+    if (unlikely(tcg_handoff)) {
+        tcg_handoff->note_write(ram_addr, size, true);
+    }
 
     if (!cpu_physical_memory_get_dirty_flag(ram_addr, DIRTY_MEMORY_CODE)) {
         tb_invalidate_phys_range_fast(ram_addr, size, retaddr);
@@ -1708,7 +1724,11 @@ int probe_access_full_mmu(CPUArchState *env, vaddr addr, int size,
     /* Handle clean RAM pages.  */
     if (unlikely(flags & TLB_NOTDIRTY)) {
         int dirtysize = size == 0 ? 1 : size;
-        notdirty_write(env_cpu(env), addr, dirtysize, *pfull, 0);
+        /* A page-table write probe is not a committed store. Keep the
+         * engine's clean/write-protected tracking until a real write. */
+        if (likely(!tcg_handoff)) {
+            notdirty_write(env_cpu(env), addr, dirtysize, *pfull, 0);
+        }
         flags &= ~TLB_NOTDIRTY;
     }
 

@@ -23,11 +23,14 @@
 #include "qapi/type-helpers.h"
 #include "hw/core/cpu.h"
 #include "accel/tcg/cpu-ops.h"
+#include "accel/tcg/handoff.h"
+#include "exec/tcg-handoff-code.h"
 #include "trace.h"
 #include "disas/disas.h"
 #include "exec/cpu-common.h"
 #include "exec/page-protection.h"
 #include "exec/translation-block.h"
+#include "exec/exec-all.h"
 #include "tcg/tcg.h"
 #include "tcg/tcg-apple-jit.h"
 #include "qemu/atomic.h"
@@ -635,6 +638,10 @@ static void cpu_exec_longjmp_cleanup(CPUState *cpu)
     assert_no_pages_locked();
 }
 
+#ifndef CONFIG_USER_ONLY
+static bool handoff_code_matches(CPUState *cpu, TranslationBlock *tb, vaddr pc);
+#endif
+
 void cpu_exec_step_atomic(CPUState *cpu)
 {
     CPUArchState *env = cpu_env(cpu);
@@ -657,6 +664,11 @@ void cpu_exec_step_atomic(CPUState *cpu)
         cflags &= ~CF_PARALLEL;
         /* After 1 insn, return and release the exclusive lock. */
         cflags |= CF_NO_GOTO_TB | CF_NO_GOTO_PTR | 1;
+#ifndef CONFIG_USER_ONLY
+        if (unlikely(tcg_handoff)) {
+            cflags |= CF_HANDOFF_GUARD;
+        }
+#endif
         /*
          * No need to check_for_breakpoints here.
          * We only arrive in cpu_exec_step_atomic after beginning execution
@@ -664,11 +676,29 @@ void cpu_exec_step_atomic(CPUState *cpu)
          * Any breakpoint for this insn will have been recognized earlier.
          */
 
+#ifndef CONFIG_USER_ONLY
+ retry_atomic_lookup:
+#endif
         tb = tb_lookup(cpu, pc, cs_base, flags, cflags);
+#ifndef CONFIG_USER_ONLY
+        if (unlikely(tb && (cflags & CF_HANDOFF_GUARD)) &&
+            !handoff_code_matches(cpu, tb, pc)) {
+            tb_phys_invalidate(tb, -1);
+            tb = NULL;
+        }
+#endif
         if (tb == NULL) {
+            bool reused;
             mmap_lock();
-            tb = tb_gen_code(cpu, pc, cs_base, flags, cflags);
+            tb = tb_gen_code(cpu, pc, cs_base, flags, cflags, &reused);
             mmap_unlock();
+#ifndef CONFIG_USER_ONLY
+            if (unlikely(reused && (cflags & CF_HANDOFF_GUARD)) &&
+                !handoff_code_matches(cpu, tb, pc)) {
+                tb_phys_invalidate(tb, -1);
+                goto retry_atomic_lookup;
+            }
+#endif
         }
 
         cpu_exec_enter(cpu);
@@ -676,6 +706,12 @@ void cpu_exec_step_atomic(CPUState *cpu)
         trace_exec_tb(tb, pc);
         cpu_tb_exec(cpu, tb, &tb_exit);
         cpu_exec_exit(cpu);
+#ifndef CONFIG_USER_ONLY
+        if (tb_exit <= TB_EXIT_IDX1 &&
+            unlikely(tcg_handoff && (tb->cflags & CF_HANDOFF_GUARD))) {
+            tcg_handoff->completed_tb(cpu, tb->icount);
+        }
+#endif
     } else {
         cpu_exec_longjmp_cleanup(cpu);
     }
@@ -974,8 +1010,20 @@ static inline void cpu_loop_exec_tb(CPUState *cpu, TranslationBlock *tb,
                                     vaddr pc, TranslationBlock **last_tb,
                                     int *tb_exit)
 {
+#ifndef CONFIG_USER_ONLY
+    TranslationBlock *entered_tb = tb;
+#endif
     trace_exec_tb(tb, pc);
     tb = cpu_tb_exec(cpu, tb, tb_exit);
+#ifndef CONFIG_USER_ONLY
+    /* Unchained control flow may return exit_tb(NULL, 0), even after
+     * executing the block. Count the input TB: guarded blocks never chain.
+     * Icount/exit-request returns before entry do not consume the budget. */
+    if (*tb_exit <= TB_EXIT_IDX1 &&
+        unlikely(tcg_handoff && (entered_tb->cflags & CF_HANDOFF_GUARD))) {
+        tcg_handoff->completed_tb(cpu, entered_tb->icount);
+    }
+#endif
     if (*tb_exit != TB_EXIT_REQUESTED) {
         *last_tb = tb;
         return;
@@ -1016,6 +1064,37 @@ static inline void cpu_loop_exec_tb(CPUState *cpu, TranslationBlock *tb,
 #endif
 }
 
+#ifndef CONFIG_USER_ONLY
+static bool handoff_code_matches(CPUState *cpu, TranslationBlock *tb, vaddr pc)
+{
+    const TcgHandoffCode *code = tcg_handoff_code(tb);
+    size_t offset = 0;
+
+    if (!code->consistent || code->length != tb->size) {
+        return false;
+    }
+    while (offset < code->length) {
+        void *host;
+        vaddr at = pc + offset;
+        size_t span = MIN(code->length - offset,
+                          TARGET_PAGE_SIZE - (at & ~TARGET_PAGE_MASK));
+
+        /* Use the real executable mapping, including second-page fetch
+         * permissions/faults. Never dereference guest virtual addresses. */
+        if (get_page_addr_code_hostp(cpu_env(cpu), at, &host) == -1 || !host) {
+            return false;
+        }
+        for (size_t i = 0; i < span; i++) {
+            if (qatomic_read((uint8_t *)host + i) != code->bytes[offset + i]) {
+                return false;
+            }
+        }
+        offset += span;
+    }
+    return true;
+}
+#endif
+
 /* main execution loop */
 
 static int __attribute__((noinline))
@@ -1033,6 +1112,7 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
             vaddr pc;
             uint64_t cs_base;
             uint32_t flags, cflags;
+            bool exact;
 
             cpu_get_tb_cpu_state(cpu_env(cpu), &pc, &cs_base, &flags);
 
@@ -1044,24 +1124,68 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
              * does not require tcg headers for cpu_common_reset.
              */
             cflags = cpu->cflags_next_tb;
+            exact = cflags != -1;
             if (cflags == -1) {
                 cflags = curr_cflags(cpu);
             } else {
                 cpu->cflags_next_tb = -1;
             }
+#ifndef CONFIG_USER_ONLY
+            if (unlikely(tcg_handoff)) {
+                bool handoff = false;
+                cflags = tcg_handoff->select_cflags(cpu, pc, flags, cflags,
+                                                    exact, &handoff);
+                if (handoff) {
+                    cpu->exception_index = EXCP_HANDOFF;
+                    break;
+                }
+            }
+#else
+            (void)exact;
+#endif
 
             if (check_for_breakpoints(cpu, pc, &cflags)) {
                 break;
             }
 
+#ifndef CONFIG_USER_ONLY
+ retry_handoff_lookup:
+#endif
             tb = tb_lookup(cpu, pc, cs_base, flags, cflags);
+#ifndef CONFIG_USER_ONLY
+            if (unlikely(tb && (cflags & CF_HANDOFF_GUARD)) &&
+                !handoff_code_matches(cpu, tb, pc)) {
+                /* Engine stores bypass TCG's notdirty path. A decoded-byte
+                 * mismatch invalidates normally, before this TB executes. */
+                tb_phys_invalidate(tb, -1);
+                tb = NULL;
+            }
+#endif
             if (tb == NULL) {
                 CPUJumpCache *jc;
                 uint32_t h;
+                bool reused;
+#ifndef CONFIG_USER_ONLY
+                if (unlikely(tcg_handoff) && cflags == curr_cflags(cpu) &&
+                    tcg_handoff->want_engine(cpu, pc, flags)) {
+                    cpu->exception_index = EXCP_HANDOFF;
+                    break;
+                }
+#endif
 
                 mmap_lock();
-                tb = tb_gen_code(cpu, pc, cs_base, flags, cflags);
+                tb = tb_gen_code(cpu, pc, cs_base, flags, cflags, &reused);
                 mmap_unlock();
+#ifndef CONFIG_USER_ONLY
+                /* Concurrent translation can select an already published
+                 * TB instead of the one just decoded. Guard that exact
+                 * returned block too, before publishing a jump-cache hit. */
+                if (unlikely(reused && (cflags & CF_HANDOFF_GUARD)) &&
+                    !handoff_code_matches(cpu, tb, pc)) {
+                    tb_phys_invalidate(tb, -1);
+                    goto retry_handoff_lookup;
+                }
+#endif
 
                 /*
                  * We add the TB in the virtual pc hash table
