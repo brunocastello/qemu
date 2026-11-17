@@ -79,6 +79,8 @@ option('hvf', type: 'feature', value: 'auto',
        description: 'HVF acceleration support')
 option('hvf_private', type: 'boolean', value: 'false',
        description: 'HVF private features (entitlements required)')
+option('hvdbt_engine', type: 'string', value: '',
+       description: 'ARM hybrid x86 engine package with a built release library')
 option('nvmm', type: 'feature', value: 'auto',
        description: 'NVMM acceleration support')
 option('xen', type: 'feature', value: 'auto',
