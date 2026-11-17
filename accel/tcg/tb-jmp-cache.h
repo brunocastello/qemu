@@ -38,11 +38,40 @@ typedef struct CPUJumpCache {
      * hash MMU guest flushes constantly.
      */
     uint32_t gen;
+    /*
+     * Address-space tag of the owning vCPU, see tlb_context_switch().  An
+     * entry counts only while its own ctx matches.  Always 0 unless the
+     * context-tagged jump cache is enabled.
+     */
+    uint32_t ctx;
+    /* Optional second chance way, see pvg_alternate_lookup_set(). */
+    struct CPUJumpCacheAlt *alt;
     struct {
         TranslationBlock *tb;
         vaddr pc;
         uint32_t gen;
+        uint32_t ctx;
     } array[TB_JMP_CACHE_SIZE];
 } CPUJumpCache;
+
+/* Same layout as one primary entry; only the owning vCPU touches it. */
+typedef struct CPUJumpCacheAlt {
+    struct rcu_head rcu;
+    struct {
+        TranslationBlock *tb;
+        vaddr pc;
+        uint32_t gen;
+        uint32_t ctx;
+    } array[TB_JMP_CACHE_SIZE];
+} CPUJumpCacheAlt;
+
+/*
+ * Local experiment: on a primary miss, probe a second entry at the same
+ * hash that keeps the TB most recently displaced from the primary.  Off by
+ * default; change only while every vCPU is stopped.
+ */
+bool pvg_alternate_lookup_enabled(void);
+void pvg_alternate_lookup_set(bool value);
+CPUJumpCacheAlt *tcg_jmp_cache_alt_new(void);
 
 #endif /* ACCEL_TCG_TB_JMP_CACHE_H */

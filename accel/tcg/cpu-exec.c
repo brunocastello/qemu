@@ -46,6 +46,54 @@
 #include "internal-common.h"
 #include "internal-target.h"
 
+/*
+ * Second-chance jump cache lookup (derived from VirtualIntelMac).  Opt-in
+ * with PVG_TCG_ALTERNATE_LOOKUP=1, the accelerator's alternate-lookup
+ * property or the machine's pvg-alternate-lookup alias.
+ */
+static bool pvg_lookup_alternate;
+
+bool pvg_alternate_lookup_enabled(void)
+{
+    return pvg_lookup_alternate;
+}
+
+CPUJumpCacheAlt *tcg_jmp_cache_alt_new(void)
+{
+    return g_new0(CPUJumpCacheAlt, 1);
+}
+
+/* Caller has stopped all vCPUs before changing the experiment. */
+void pvg_alternate_lookup_set(bool value)
+{
+    CPUState *cpu;
+
+    CPU_FOREACH(cpu) {
+        CPUJumpCache *jc = cpu->tb_jmp_cache;
+
+        if (!jc) {
+            continue;
+        }
+        if (value && !jc->alt) {
+            jc->alt = tcg_jmp_cache_alt_new();
+        }
+        for (unsigned i = 0; i < TB_JMP_CACHE_SIZE; i++) {
+            qatomic_set(&jc->array[i].tb, NULL);
+            if (jc->alt) {
+                qatomic_set(&jc->alt->array[i].tb, NULL);
+            }
+        }
+    }
+    pvg_lookup_alternate = value;
+}
+
+static void __attribute__((constructor)) pvg_init_lookup_alternate(void)
+{
+    const char *value = getenv("PVG_TCG_ALTERNATE_LOOKUP");
+
+    pvg_lookup_alternate = value && !strcmp(value, "1");
+}
+
 /* -icount align implementation. */
 
 typedef struct SyncClocks {
@@ -248,6 +296,7 @@ static inline TranslationBlock *tb_lookup(CPUState *cpu, vaddr pc,
     tb = qatomic_read(&jc->array[hash].tb);
     if (likely(tb &&
                jc->array[hash].gen == jc->gen &&
+               jc->array[hash].ctx == jc->ctx &&
                jc->array[hash].pc == pc &&
                tb->cs_base == cs_base &&
                tb->flags == flags &&
@@ -255,13 +304,37 @@ static inline TranslationBlock *tb_lookup(CPUState *cpu, vaddr pc,
         goto hit;
     }
 
+    if (unlikely(pvg_lookup_alternate) && jc->alt) {
+        tb = qatomic_read(&jc->alt->array[hash].tb);
+        if (tb &&
+            jc->alt->array[hash].gen == jc->gen &&
+            jc->alt->array[hash].ctx == jc->ctx &&
+            jc->alt->array[hash].pc == pc &&
+            tb->cs_base == cs_base &&
+            tb->flags == flags &&
+            tb_cflags(tb) == cflags) {
+            goto publish;
+        }
+    }
+
     tb = tb_htable_lookup(cpu, pc, cs_base, flags, cflags);
     if (tb == NULL) {
         return NULL;
     }
 
+publish:
+    if (unlikely(pvg_lookup_alternate) && jc->alt) {
+        /* Keep the displaced primary entry as the second chance. */
+        TranslationBlock *old = qatomic_read(&jc->array[hash].tb);
+
+        jc->alt->array[hash].pc = jc->array[hash].pc;
+        jc->alt->array[hash].gen = jc->array[hash].gen;
+        jc->alt->array[hash].ctx = jc->array[hash].ctx;
+        qatomic_set(&jc->alt->array[hash].tb, old);
+    }
     jc->array[hash].pc = pc;
     jc->array[hash].gen = jc->gen;
+    jc->array[hash].ctx = jc->ctx;
     qatomic_set(&jc->array[hash].tb, tb);
 
 hit:
@@ -998,6 +1071,7 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
                 jc = cpu->tb_jmp_cache;
                 jc->array[h].pc = pc;
                 jc->array[h].gen = jc->gen;
+                jc->array[h].ctx = jc->ctx;
                 qatomic_set(&jc->array[h].tb, tb);
             }
 
@@ -1083,6 +1157,9 @@ bool tcg_exec_realizefn(CPUState *cpu, Error **errp)
     }
 
     cpu->tb_jmp_cache = g_new0(CPUJumpCache, 1);
+    if (pvg_lookup_alternate) {
+        cpu->tb_jmp_cache->alt = tcg_jmp_cache_alt_new();
+    }
     tlb_init(cpu);
 #ifndef CONFIG_USER_ONLY
     tcg_iommu_init_notifier_list(cpu);
@@ -1100,5 +1177,8 @@ void tcg_exec_unrealizefn(CPUState *cpu)
 #endif /* !CONFIG_USER_ONLY */
 
     tlb_destroy(cpu);
+    if (cpu->tb_jmp_cache->alt) {
+        g_free_rcu(cpu->tb_jmp_cache->alt, rcu);
+    }
     g_free_rcu(cpu->tb_jmp_cache, rcu);
 }

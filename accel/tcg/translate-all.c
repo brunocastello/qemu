@@ -682,6 +682,10 @@ void tcg_flush_jmp_cache(CPUState *cpu)
         for (int i = 0; i < TB_JMP_CACHE_SIZE; i++) {
             qatomic_set(&jc->array[i].tb, NULL);
             jc->array[i].gen = 0;
+            if (jc->alt) {
+                qatomic_set(&jc->alt->array[i].tb, NULL);
+                jc->alt->array[i].gen = 0;
+            }
         }
         jc->gen = 1;
     }

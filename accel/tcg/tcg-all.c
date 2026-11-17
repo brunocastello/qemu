@@ -38,8 +38,10 @@
 #include "hw/qdev-core.h"
 #else
 #include "hw/boards.h"
+#include "system/runstate.h"
 #endif
 #include "internal-common.h"
+#include "tb-jmp-cache.h"
 #include "cpu-param.h"
 
 
@@ -110,6 +112,15 @@ static int tcg_init_machine(MachineState *ms)
     unsigned max_cpus = 1;
 #else
     unsigned max_cpus = ms->smp.max_cpus;
+#endif
+
+#ifndef CONFIG_USER_ONLY
+    /*
+     * The accelerator is not a child in the public QOM tree.  Expose the
+     * local comparison controls on the owning machine (for qom-set).
+     */
+    object_property_add_alias(OBJECT(ms), "pvg-alternate-lookup",
+                              OBJECT(s), "alternate-lookup");
 #endif
 
     tcg_allowed = true;
@@ -212,6 +223,22 @@ static void tcg_set_one_insn_per_tb(Object *obj, bool value, Error **errp)
     qatomic_set(&one_insn_per_tb, value);
 }
 
+#ifndef CONFIG_USER_ONLY
+static bool tcg_get_alternate_lookup(Object *obj, Error **errp)
+{
+    return pvg_alternate_lookup_enabled();
+}
+
+static void tcg_set_alternate_lookup(Object *obj, bool value, Error **errp)
+{
+    if (runstate_is_running()) {
+        error_setg(errp, "Stop the VM before changing alternate-lookup");
+        return;
+    }
+    pvg_alternate_lookup_set(value);
+}
+#endif
+
 static int tcg_gdbstub_supported_sstep_flags(void)
 {
     /*
@@ -257,6 +284,13 @@ static void tcg_accel_class_init(ObjectClass *oc, void *data)
                                    tcg_set_one_insn_per_tb);
     object_class_property_set_description(oc, "one-insn-per-tb",
         "Only put one guest insn in each translation block");
+#ifndef CONFIG_USER_ONLY
+    object_class_property_add_bool(oc, "alternate-lookup",
+                                   tcg_get_alternate_lookup,
+                                   tcg_set_alternate_lookup);
+    object_class_property_set_description(oc, "alternate-lookup",
+        "Second-chance jump cache way; change only while stopped");
+#endif
 }
 
 static const TypeInfo tcg_accel_type = {
