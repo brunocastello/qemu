@@ -60,11 +60,44 @@ typedef struct PTETranslate {
     hwaddr gaddr;
 } PTETranslate;
 
+/*
+ * PVG_TCG_FAST_PTW=1 (derived from VirtualIntelMac): avoid the general probe
+ * helper for an already valid, ordinary RAM page-table access.  This does not
+ * cache page-table contents or retain virtual translations across an
+ * architectural invalidation.  Off by default.
+ */
+static bool x86_tcg_fast_ptw;
+
+static void __attribute__((constructor)) init_fast_ptw(void)
+{
+    const char *value = getenv("PVG_TCG_FAST_PTW");
+
+    x86_tcg_fast_ptw = value && !strcmp(value, "1");
+}
+
 static bool ptw_translate(PTETranslate *inout, hwaddr addr)
 {
     int flags;
 
     inout->gaddr = addr;
+    if (x86_tcg_fast_ptw && inout->ptw_idx == MMU_PHYS_IDX) {
+        CPUTLBDescFast *fast = &env_cpu(inout->env)->neg.tlb.f[MMU_PHYS_IDX];
+        uintptr_t index = (addr >> TARGET_PAGE_BITS) &
+                          (fast->mask >> CPU_TLB_ENTRY_BITS);
+        CPUTLBEntry *entry = &fast->table[index];
+
+        /*
+         * Exact equality excludes INVALID, NOTDIRTY and FORCE_SLOW. The
+         * latter covers every full-entry slow flag, including MMIO and
+         * watchpoints. Clean/code pages still take notdirty_write(), nested
+         * translation still takes the original probe, and the original
+         * atomic accessed/dirty-bit update remains below.
+         */
+        if (qatomic_read(&entry->addr_write) == (addr & TARGET_PAGE_MASK)) {
+            inout->haddr = (void *)((uintptr_t)addr + entry->addend);
+            return true;
+        }
+    }
     flags = probe_access_full_mmu(inout->env, addr, 0, MMU_DATA_STORE,
                                   inout->ptw_idx, &inout->haddr, NULL);
 
