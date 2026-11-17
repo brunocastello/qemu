@@ -48,6 +48,10 @@
 #ifdef __APPLE__
 #define VIM_VRAM_INPROCESS_PROVIDER 1 /* exports vim_vram_inprocess_lookup */
 #include "vim-vram-memory.h"
+#ifdef CONFIG_VMSVGA_GPU_DISPLAY
+#define VMSVGA_GPU_DISPLAY 1 /* executor frames as Metal scanout textures */
+#include "vmware_vga_gpu.h"
+#endif
 #endif
 
 #undef VERBOSE
@@ -88,6 +92,13 @@ struct vmsvga_state_s {
     struct VIMVRAMMemoryServer *legacy_vram_memory;
     struct VIMVRAMMemoryServer *legacy_ram_memory;
     Notifier legacy_ram_ready;
+#ifdef VMSVGA_GPU_DISPLAY
+    /* The executor's frames are the console scanout (vmware_vga_gpu.c);
+     * guest software updates are held back while one is, unless
+     * VIM_DISPLAY_LATEST_WINS=1 lets them take the console back. */
+    VMSVGAGpuDisplay *gpu_display;
+    bool gpu_latest_wins;
+#endif
 #endif
 
     int invalidated;
@@ -544,6 +555,47 @@ static bool vmsvga_vram_holds_old_mode(struct vmsvga_state_s *s)
     return true;
 }
 
+#ifdef VMSVGA_GPU_DISPLAY
+/* Show the software surface again after GPU frames (copy of its last image;
+ * the surface itself is kept current while the GPU owns the scanout). */
+static void vmsvga_gpu_to_software(struct vmsvga_state_s *s)
+{
+    if (!vmsvga_gpu_display_active(s->gpu_display)) {
+        return;
+    }
+    DisplaySurface *old = qemu_console_surface(s->vga.con);
+    DisplaySurface *surface = qemu_create_displaysurface(surface_width(old),
+                                                         surface_height(old));
+    if (surface_bits_per_pixel(old) == surface_bits_per_pixel(surface)) {
+        int row = surface_width(old) * surface_bytes_per_pixel(old);
+        for (int y = 0; y < surface_height(old); y++) {
+            memcpy(surface_data(surface) + y * surface_stride(surface),
+                   surface_data(old) + y * surface_stride(old), row);
+        }
+    }
+    dpy_gl_scanout_disable(s->vga.con);
+    dpy_gfx_replace_surface(s->vga.con, surface);
+    dpy_gfx_update_full(s->vga.con);
+}
+#endif
+
+/* Notify the listeners of a software update, unless a GPU frame owns the
+ * scanout: its listeners would draw this surface over the frame. */
+static void vmsvga_gfx_update(struct vmsvga_state_s *s,
+                              int x, int y, int w, int h)
+{
+#ifdef VMSVGA_GPU_DISPLAY
+    if (vmsvga_gpu_display_active(s->gpu_display)) {
+        if (!s->gpu_latest_wins) {
+            return;
+        }
+        vmsvga_gpu_to_software(s);
+        return; /* the switch already published the full surface */
+    }
+#endif
+    dpy_gfx_update(s->vga.con, x, y, w, h);
+}
+
 static inline void vmsvga_update_rect(struct vmsvga_state_s *s,
                                       int x, int y, int w, int h)
 {
@@ -585,7 +637,7 @@ static inline void vmsvga_update_rect(struct vmsvga_state_s *s,
         s->mode_switch_pending = false;
         vmsvga_release_old_mode(s);
     }
-    dpy_gfx_update(s->vga.con, x, y, w, h);
+    vmsvga_gfx_update(s, x, y, w, h);
 }
 
 static inline void vmsvga_update_rect_flush(struct vmsvga_state_s *s)
@@ -1580,6 +1632,9 @@ static bool vmsvga_update_display(void *opaque)
         s->mode_switch_pending = false;
         vmsvga_release_old_mode(s);
         s->scanout_pitch = 0;
+#ifdef VMSVGA_GPU_DISPLAY
+        vmsvga_gpu_to_software(s); /* back to VGA: not the guest's GPU frames */
+#endif
         s->vga.hw_ops->gfx_update(&s->vga);
         return true;
     }
@@ -1599,14 +1654,16 @@ static bool vmsvga_update_display(void *opaque)
              * rectangles while invalidated. */
             DisplaySurface *surface = qemu_console_surface(s->vga.con);
             if (s->mode_switch_pending) {
-                dpy_gfx_update(s->vga.con, 0, 0, surface_width(surface),
-                                    surface_height(surface));
+                vmsvga_gfx_update(s, 0, 0, surface_width(surface),
+                                  surface_height(surface));
             } else {
                 vmsvga_update_rect(s, 0, 0, surface_width(surface),
                                    surface_height(surface));
             }
         } else {
-            dpy_gfx_update_full(s->vga.con);
+            DisplaySurface *surface = qemu_console_surface(s->vga.con);
+            vmsvga_gfx_update(s, 0, 0, surface_width(surface),
+                              surface_height(surface));
         }
     } else if (s->mode_switch_pending && !s->mode_switch_image &&
                qemu_clock_get_ms(QEMU_CLOCK_REALTIME) >= s->mode_switch_deadline) {
@@ -1627,6 +1684,9 @@ static void vmsvga_reset(DeviceState *dev)
     struct vmsvga_state_s *s = &pci->chip;
 
     vmsvga_passthrough_opengl_reset(s);
+#ifdef VMSVGA_GPU_DISPLAY
+    vmsvga_gpu_to_software(s);
+#endif
     s->mode_switch_pending = false;
     vmsvga_release_old_mode(s);
     s->scanout_pitch = 0;
@@ -1765,6 +1825,25 @@ static const GraphicHwOps vmsvga_ops = {
     .ui_info     = vmsvga_ui_info,
 };
 
+#ifdef VMSVGA_GPU_DISPLAY
+static void vmsvga_gl_block(void *opaque, bool block)
+{
+    struct vmsvga_state_s *s = opaque;
+
+    vmsvga_gpu_display_gl_block(s->gpu_display, block);
+}
+
+/* Only with the in-process display owner, so the console's GL block
+ * bookkeeping is otherwise as before. */
+static const GraphicHwOps vmsvga_gpu_ops = {
+    .invalidate  = vmsvga_invalidate_display,
+    .gfx_update  = vmsvga_update_display_void,
+    .text_update = vmsvga_text_update,
+    .ui_info     = vmsvga_ui_info,
+    .gl_block    = vmsvga_gl_block,
+};
+#endif
+
 #ifdef __APPLE__
 /*
  * UTM: with passthrough-opengl-bridge=on and no explicit
@@ -1850,7 +1929,30 @@ static void vmsvga_init(DeviceState *dev, struct vmsvga_state_s *s,
     s->scratch_size = SVGA_SCRATCH_SIZE;
     s->scratch = g_malloc(s->scratch_size * 4);
 
-    s->vga.con = graphic_console_init(dev, 0, &vmsvga_ops, s);
+    const GraphicHwOps *ops = &vmsvga_ops;
+#ifdef VMSVGA_GPU_DISPLAY
+    /* QEMU owns the executor's display unless the app/launcher supplies an
+     * endpoint (VIM_OPENGL_DISPLAY_ENDPOINT) or another device took it. */
+    bool gpu_display = s->passthrough_opengl_bridge &&
+        getenv("VIM_PASSTHROUGH_OPENGL_INPROCESS_LIBRARY") &&
+        !getenv("VIM_OPENGL_DISPLAY_ENDPOINT") &&
+        !getenv("VIM_OPENGL_DISPLAY_INPROCESS");
+    if (gpu_display) {
+        ops = &vmsvga_gpu_ops;
+    }
+#endif
+    s->vga.con = graphic_console_init(dev, 0, ops, s);
+#ifdef VMSVGA_GPU_DISPLAY
+    if (gpu_display && (s->gpu_display = vmsvga_gpu_display_new(s->vga.con))) {
+        char address[32];
+
+        s->gpu_latest_wins =
+            g_strcmp0(getenv("VIM_DISPLAY_LATEST_WINS"), "1") == 0;
+        snprintf(address, sizeof(address), "%p",
+                 (void *)vmsvga_gpu_display_port);
+        setenv("VIM_OPENGL_DISPLAY_INPROCESS", address, 1);
+    }
+#endif
 
     s->fifo_size = SVGA_FIFO_SIZE;
     memory_region_init_ram(&s->fifo_ram, NULL, "vmsvga.fifo", s->fifo_size,
@@ -2008,6 +2110,13 @@ static void pci_vmsvga_exit(PCIDevice *dev)
     if (s->passthrough_opengl_bridge) {
         pci_set_irq(dev, 0);
     }
+#ifdef VMSVGA_GPU_DISPLAY
+    if (s->gpu_display) {
+        unsetenv("VIM_OPENGL_DISPLAY_INPROCESS");
+        vmsvga_gpu_display_free(s->gpu_display);
+        s->gpu_display = NULL;
+    }
+#endif
 }
 
 static const Property vga_vmware_properties[] = {
