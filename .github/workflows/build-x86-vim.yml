@@ -26,29 +26,37 @@ jobs:
           git init -q vim && cd vim
           git remote add origin "$VIM_REPO"
           git sparse-checkout set Source/PassthroughOpenGL Source/scripts Source/prebuilt/PassthroughOpenGL/common \
-            Source/vendor/qemu/include/hw/display Source/vendor/qemu/hw/display Source/vendor/source/VMsvga2 Source/probes Source/tools
+            Source/vendor/qemu/include/hw/display Source/vendor/qemu/hw/display Source/vendor/source/VMsvga2 Source/probes Source/tools Source/HybridHypervisor
           git fetch -q --depth 1 --filter=blob:none origin "$VIM_COMMIT" && git checkout -q FETCH_HEAD
           # our in-process VRAM/RAM handoff (UTM's sandbox refuses bootstrap services)
           cp "$GITHUB_WORKSPACE/hw/display/vim-vram-memory.h" Source/vendor/qemu/hw/display/vim-vram-memory.h
           python3 Source/scripts/build-opengl-host.py --output "$GITHUB_WORKSPACE/hostlib"
           lipo -archs "$GITHUB_WORKSPACE/hostlib/libVIMPassthroughOpenGLHost.dylib"
+      - name: Hybrid Hypervisor engine (libEngine.a)
+        run: |
+          zsh vim/Source/HybridHypervisor/build.sh release --library-only
+          ls -l vim/Source/HybridHypervisor/.build/release/libEngine.a
       - name: Configure and build
         run: |
           mkdir build && cd build
           ../configure --python=/tmp/venv/bin/python3 --target-list=x86_64-softmmu,ppc-softmmu \
-            --disable-docs --disable-sdl --disable-werror -Doptimization=2 --enable-spice --disable-dbus-display --disable-opengl
+            --disable-docs --disable-sdl --disable-werror -Doptimization=2 --enable-spice --disable-dbus-display --disable-opengl \
+            -Dhvdbt_engine="$GITHUB_WORKSPACE/vim/Source/HybridHypervisor"
           ninja qemu-system-x86_64 qemu-system-ppc qemu-img
       - name: Bundle
         run: |
           mkdir -p dist/lib
-          cp build/qemu-system-x86_64 build/qemu-img dist/
+          cp build/qemu-system-x86_64 build/qemu-system-ppc build/qemu-img dist/
           cp hostlib/libVIMPassthroughOpenGLHost.dylib dist/
-          dylibbundler -of -b -x dist/qemu-system-x86_64 -x dist/qemu-img -d dist/lib -p @executable_path/lib/
-          for f in dist/qemu-system-x86_64 dist/qemu-img dist/lib/*.dylib; do
+          dylibbundler -of -b -x dist/qemu-system-x86_64 -x dist/qemu-system-ppc -x dist/qemu-img -d dist/lib -p @executable_path/lib/
+          for f in dist/qemu-system-x86_64 dist/qemu-system-ppc dist/qemu-img dist/lib/*.dylib; do
             while [ "$(otool -l "$f" | grep -c 'path @executable_path/lib/')" -gt 1 ]; do
               install_name_tool -delete_rpath @executable_path/lib/ "$f"; done; done
           cp -R pc-bios dist/pc-bios
-          for f in dist/qemu-system-x86_64 dist/qemu-img dist/libVIMPassthroughOpenGLHost.dylib dist/lib/*.dylib; do codesign -f -s - "$f"; done
+          for f in dist/qemu-system-x86_64 dist/qemu-system-ppc dist/qemu-img dist/libVIMPassthroughOpenGLHost.dylib dist/lib/*.dylib; do codesign -f -s - "$f"; done
+          # Hybrid Hypervisor runs the guest in a Hypervisor.framework VM
+          codesign -f -s - --entitlements accel/hvf/entitlements.plist dist/qemu-system-x86_64
+          codesign -d --entitlements - dist/qemu-system-x86_64 | grep -q com.apple.security.hypervisor
           otool -L dist/qemu-system-x86_64 | grep -v -E "@executable_path|/usr/lib|/System" && echo "UNBUNDLED DEPS ABOVE" || echo "all deps bundled"
           tar -czf qemu-x86-vim-macos-arm64.tgz -C dist .
       - uses: actions/upload-artifact@v4
