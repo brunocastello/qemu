@@ -311,6 +311,8 @@ typedef struct CPUTLBCommon {
     size_t full_flush_count;
     size_t part_flush_count;
     size_t elide_flush_count;
+    /* Optional PCID context retention, owned by the software TLB. */
+    struct CPUTLBContextCache *contexts;
 } CPUTLBCommon;
 
 /*
@@ -322,7 +324,8 @@ typedef struct CPUTLBCommon {
 typedef struct CPUTLB {
 #ifdef CONFIG_TCG
     CPUTLBCommon c;
-    CPUTLBDesc d[NB_MMU_MODES];
+    /* Allocated array of NB_MMU_MODES: a context switch can swap it. */
+    CPUTLBDesc *d;
     CPUTLBDescFast f[NB_MMU_MODES];
 #endif
 } CPUTLB;

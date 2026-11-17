@@ -48,6 +48,78 @@
 #endif
 #include "tcg/tcg-ldst.h"
 
+/*
+ * Local capacity experiment (derived from VirtualIntelMac): keep adaptive
+ * growth and every invalidation, but never shrink a TLB below a floor.
+ * This avoids repeatedly shrinking retained PCID banks below a working set
+ * that may not trigger another resizing flush for some time.  The default
+ * floor is the stock minimum, i.e. no change.
+ */
+static unsigned pvg_tlb_floor_bits = CPU_TLB_DYN_MIN_BITS;
+static uint32_t pvg_tlb_floor_mask = (1u << NB_MMU_MODES) - 1;
+static bool pvg_context_jump_cache;
+
+bool tlb_context_jump_cache_enabled(void)
+{
+    return pvg_context_jump_cache;
+}
+
+void tlb_context_jump_cache_set(bool enabled)
+{
+    CPUState *cpu;
+
+    pvg_context_jump_cache = enabled;
+    CPU_FOREACH(cpu) {
+        /*
+         * While disabled the tag does not follow CR3 switches.  Do not
+         * attribute fills before the next context switch to that stale
+         * address space: UINT32_MAX is never a context slot, the next
+         * switch publishes the real tag, and intervening fills are
+         * unreachable thereafter.
+         */
+        if (cpu->tb_jmp_cache) {
+            cpu->tb_jmp_cache->ctx = UINT32_MAX;
+        }
+        tcg_flush_jmp_cache(cpu);
+    }
+}
+
+static void __attribute__((constructor)) pvg_init_tlb_floor(void)
+{
+#if defined(__aarch64__)
+    const char *value = getenv("PVG_TCG_CONTEXT_JMP_CACHE");
+
+    pvg_context_jump_cache = value && !strcmp(value, "1");
+    value = getenv("PVG_TCG_TLB_FLOOR_BITS");
+    if (value) {
+        char *end;
+        unsigned long bits = strtoul(value, &end, 10);
+        if (!*value || *end || bits < CPU_TLB_DYN_MIN_BITS || bits > 14) {
+            error_report("PVG_TCG_TLB_FLOOR_BITS must be 6..14");
+            exit(EXIT_FAILURE);
+        }
+        pvg_tlb_floor_bits = bits;
+    }
+    value = getenv("PVG_TCG_TLB_FLOOR_MASK");
+    if (value) {
+        char *end;
+        unsigned long mask = strtoul(value, &end, 0);
+        if (!*value || *end || mask > ((1u << NB_MMU_MODES) - 1)) {
+            error_report("PVG_TCG_TLB_FLOOR_MASK must name valid MMU slots");
+            exit(EXIT_FAILURE);
+        }
+        pvg_tlb_floor_mask = mask;
+    }
+#endif
+}
+
+static size_t pvg_tlb_floor_entries(unsigned mmu_idx)
+{
+    unsigned bits = pvg_tlb_floor_mask & (1u << mmu_idx) ?
+                    pvg_tlb_floor_bits : CPU_TLB_DYN_MIN_BITS;
+    return (size_t)1 << MIN(bits, CPU_TLB_DYN_MAX_BITS);
+}
+
 /* DEBUG defines, enable DEBUG_TLB_LOG to log to the CPU_LOG_MMU target */
 /* #define DEBUG_TLB */
 /* #define DEBUG_TLB_LOG */
@@ -202,7 +274,7 @@ static void tb_jmp_cache_clear_page(CPUState *cpu, vaddr page_addr)
  * conflict misses.
  */
 static void tlb_mmu_resize_locked(CPUTLBDesc *desc, CPUTLBDescFast *fast,
-                                  int64_t now)
+                                  int64_t now, unsigned mmu_idx)
 {
     size_t old_size = tlb_n_entries(fast);
     size_t rate;
@@ -235,7 +307,7 @@ static void tlb_mmu_resize_locked(CPUTLBDesc *desc, CPUTLBDescFast *fast,
         if (expected_rate > 70) {
             ceil *= 2;
         }
-        new_size = MAX(ceil, 1 << CPU_TLB_DYN_MIN_BITS);
+        new_size = MAX(ceil, pvg_tlb_floor_entries(mmu_idx));
     }
 
     if (new_size == old_size) {
@@ -292,13 +364,15 @@ static void tlb_flush_one_mmuidx_locked(CPUState *cpu, int mmu_idx,
     CPUTLBDesc *desc = &cpu->neg.tlb.d[mmu_idx];
     CPUTLBDescFast *fast = &cpu->neg.tlb.f[mmu_idx];
 
-    tlb_mmu_resize_locked(desc, fast, now);
+    tlb_mmu_resize_locked(desc, fast, now, mmu_idx);
     tlb_mmu_flush_locked(desc, fast);
 }
 
-static void tlb_mmu_init(CPUTLBDesc *desc, CPUTLBDescFast *fast, int64_t now)
+static void tlb_mmu_init(CPUTLBDesc *desc, CPUTLBDescFast *fast, int64_t now,
+                         unsigned mmu_idx)
 {
-    size_t n_entries = 1 << CPU_TLB_DYN_DEFAULT_BITS;
+    size_t n_entries = MAX(1 << CPU_TLB_DYN_DEFAULT_BITS,
+                           pvg_tlb_floor_entries(mmu_idx));
 
     tlb_window_reset(desc, now, 0);
     desc->n_used_entries = 0;
@@ -306,6 +380,146 @@ static void tlb_mmu_init(CPUTLBDesc *desc, CPUTLBDescFast *fast, int64_t now)
     fast->table = g_new(CPUTLBEntry, n_entries);
     desc->fulltlb = g_new(CPUTLBEntryFull, n_entries);
     tlb_mmu_flush_locked(desc, fast);
+}
+
+/*
+ * Local experiment: retain a small number of complete software-TLB contexts.
+ * Fast-path descriptors stay inline in CPUState; only the slow descriptor
+ * pointer and the mask/table pairs change at a context switch.  All ownership
+ * changes and invalidations are serialized with the existing TLB lock.
+ */
+#define TLB_CONTEXT_BANKS 8
+typedef struct CPUTLBContextBank {
+    uint64_t key;
+    bool valid;
+    CPUTLBDesc *d;
+    CPUTLBDescFast f[NB_MMU_MODES];
+} CPUTLBContextBank;
+
+typedef struct CPUTLBContextCache {
+    unsigned active, next;
+    bool known;
+    CPUTLBContextBank bank[TLB_CONTEXT_BANKS];
+} CPUTLBContextCache;
+
+/*
+ * Caller holds the TLB lock. Inactive contexts must not evade any existing
+ * invalidation path. False positives are intentional.
+ */
+static void tlb_context_invalidate_locked(CPUState *cpu, bool forget_active)
+{
+    CPUTLBContextCache *cache = cpu->neg.tlb.c.contexts;
+    if (!cache) {
+        return;
+    }
+    for (unsigned i = 0; i < TLB_CONTEXT_BANKS; i++) {
+        if (i != cache->active) {
+            cache->bank[i].valid = false;
+        }
+    }
+    if (forget_active) {
+        cache->known = false;
+        cache->bank[cache->active].valid = false;
+    }
+}
+
+void tlb_context_switch(CPUState *cpu, uint64_t key, bool preserve)
+{
+    CPUTLBContextCache *cache;
+    CPUTLBContextBank *bank;
+    unsigned slot;
+    bool same_context;
+    bool retained_context = false;
+
+    assert_cpu_is_self(cpu);
+    qemu_spin_lock(&cpu->neg.tlb.c.lock);
+    cache = cpu->neg.tlb.c.contexts;
+    if (!cache) {
+        cache = g_new0(CPUTLBContextCache, 1);
+        cache->bank[0].d = cpu->neg.tlb.d;
+        cpu->neg.tlb.c.contexts = cache;
+    }
+    same_context = preserve && cache->known &&
+                   cache->bank[cache->active].valid &&
+                   cache->bank[cache->active].key == key;
+    if (!preserve || !cache->known) {
+        /*
+         * A flushing CR3 write must invalidate all cached instances of its
+         * PCID, even if a previous instance used another root. Flush every
+         * bank conservatively, retaining the current allocation.
+         */
+        tlb_context_invalidate_locked(cpu, true);
+        for (int i = 0; i < NB_MMU_MODES; i++) {
+            tlb_flush_one_mmuidx_locked(cpu, i, get_clock_realtime());
+        }
+        cache->known = true;
+        bank = &cache->bank[cache->active];
+        bank->key = key;
+        bank->valid = true;
+    } else if (cache->bank[cache->active].key != key) {
+        for (slot = 0; slot < TLB_CONTEXT_BANKS; slot++) {
+            if (slot != cache->active && cache->bank[slot].valid &&
+                cache->bank[slot].key == key) {
+                break;
+            }
+        }
+        if (slot == TLB_CONTEXT_BANKS) {
+            do {
+                slot = cache->next++ % TLB_CONTEXT_BANKS;
+            } while (slot == cache->active);
+        } else {
+            retained_context = true;
+        }
+        /* Snapshot the active descriptors, not their backing arrays. */
+        memcpy(cache->bank[cache->active].f, cpu->neg.tlb.f,
+               sizeof(cpu->neg.tlb.f));
+        bank = &cache->bank[slot];
+        if (!bank->d) {
+            bank->d = g_new0(CPUTLBDesc, NB_MMU_MODES);
+            for (int i = 0; i < NB_MMU_MODES; i++) {
+                tlb_mmu_init(&bank->d[i], &bank->f[i], get_clock_realtime(), i);
+            }
+        } else if (!bank->valid || bank->key != key) {
+            for (int i = 0; i < NB_MMU_MODES; i++) {
+                /*
+                 * Preserve the normal occupancy-driven growth policy. Bank
+                 * reuse must not pin memory-heavy contexts to 256 entries.
+                 */
+                tlb_mmu_resize_locked(&bank->d[i], &bank->f[i],
+                                      get_clock_realtime(), i);
+                tlb_mmu_flush_locked(&bank->d[i], &bank->f[i]);
+            }
+        }
+        bank->key = key;
+        bank->valid = true;
+        cpu->neg.tlb.d = bank->d;
+        memcpy(cpu->neg.tlb.f, bank->f, sizeof(cpu->neg.tlb.f));
+        cache->active = slot;
+    }
+    /*
+     * Restored contexts may contain entries in any MMU mode. Never allow the
+     * dirty-mask optimization to elide a required subsequent invalidation.
+     */
+    cpu->neg.tlb.c.dirty = ALL_MMUIDX_BITS;
+    qemu_spin_unlock(&cpu->neg.tlb.c.lock);
+    /*
+     * By default actual switches and flushing writes invalidate the jump
+     * cache. The context-tagged experiment keeps entries only when
+     * restoring an already-valid data/code TLB bank; invalidated or
+     * recycled banks still retire the whole cache. A preserving write of
+     * the already-active full CR3+PCID changes no mapping, however; retain
+     * the jump cache just as we retain the data/code software TLB entries.
+     * All other invalidation paths still clear the cache normally.
+     *
+     * The tag is the bank slot: a slot only changes owner on a path that
+     * retires the cache, so within one generation slot and CR3 map 1:1.
+     */
+    if (pvg_context_jump_cache) {
+        cpu->tb_jmp_cache->ctx = cache->active;
+    }
+    if (!same_context && !(pvg_context_jump_cache && retained_context)) {
+        tcg_flush_jmp_cache(cpu);
+    }
 }
 
 static inline void tlb_n_used_entries_inc(CPUState *cpu, uintptr_t mmu_idx)
@@ -327,15 +541,35 @@ void tlb_init(CPUState *cpu)
 
     /* All tlbs are initialized flushed. */
     cpu->neg.tlb.c.dirty = 0;
+    cpu->neg.tlb.c.contexts = NULL;
+    cpu->neg.tlb.d = g_new0(CPUTLBDesc, NB_MMU_MODES);
 
     for (i = 0; i < NB_MMU_MODES; i++) {
-        tlb_mmu_init(&cpu->neg.tlb.d[i], &cpu->neg.tlb.f[i], now);
+        tlb_mmu_init(&cpu->neg.tlb.d[i], &cpu->neg.tlb.f[i], now, i);
     }
 }
 
 void tlb_destroy(CPUState *cpu)
 {
     int i;
+    CPUTLBContextCache *cache = cpu->neg.tlb.c.contexts;
+
+    if (cache) {
+        for (unsigned b = 0; b < TLB_CONTEXT_BANKS; b++) {
+            CPUTLBContextBank *bank = &cache->bank[b];
+
+            /* The active bank is freed below through cpu->neg.tlb. */
+            if (b == cache->active || !bank->d) {
+                continue;
+            }
+            for (i = 0; i < NB_MMU_MODES; i++) {
+                g_free(bank->f[i].table);
+                g_free(bank->d[i].fulltlb);
+            }
+            g_free(bank->d);
+        }
+        g_free(cache);
+    }
 
     qemu_spin_destroy(&cpu->neg.tlb.c.lock);
     for (i = 0; i < NB_MMU_MODES; i++) {
@@ -345,6 +579,7 @@ void tlb_destroy(CPUState *cpu)
         g_free(fast->table);
         g_free(desc->fulltlb);
     }
+    g_free(cpu->neg.tlb.d);
 }
 
 /* flush_all_helper: run fn across all cpus
@@ -379,6 +614,7 @@ static void tlb_flush_by_mmuidx_async_work(CPUState *cpu, run_on_cpu_data data)
     qemu_spin_lock(&cpu->neg.tlb.c.lock);
 
     all_dirty = cpu->neg.tlb.c.dirty;
+    tlb_context_invalidate_locked(cpu, true);
     to_clean = asked & all_dirty;
     all_dirty &= ~to_clean;
     cpu->neg.tlb.c.dirty = all_dirty;
@@ -538,6 +774,7 @@ static void tlb_flush_page_by_mmuidx_async_0(CPUState *cpu,
     tlb_debug("page addr: %016" VADDR_PRIx " mmu_map:0x%x\n", addr, idxmap);
 
     qemu_spin_lock(&cpu->neg.tlb.c.lock);
+    tlb_context_invalidate_locked(cpu, false);
     for (mmu_idx = 0; mmu_idx < NB_MMU_MODES; mmu_idx++) {
         if ((idxmap >> mmu_idx) & 1) {
             tlb_flush_page_locked(cpu, mmu_idx, addr);
@@ -746,6 +983,7 @@ static void tlb_flush_range_by_mmuidx_async_0(CPUState *cpu,
               d.addr, d.bits, d.len, d.idxmap);
 
     qemu_spin_lock(&cpu->neg.tlb.c.lock);
+    tlb_context_invalidate_locked(cpu, false);
     for (mmu_idx = 0; mmu_idx < NB_MMU_MODES; mmu_idx++) {
         if ((d.idxmap >> mmu_idx) & 1) {
             tlb_flush_range_locked(cpu, mmu_idx, d.addr, d.len, d.bits);
@@ -944,6 +1182,7 @@ void tlb_reset_dirty(CPUState *cpu, ram_addr_t start1, ram_addr_t length)
     int mmu_idx;
 
     qemu_spin_lock(&cpu->neg.tlb.c.lock);
+    tlb_context_invalidate_locked(cpu, false);
     for (mmu_idx = 0; mmu_idx < NB_MMU_MODES; mmu_idx++) {
         unsigned int i;
         unsigned int n = tlb_n_entries(&cpu->neg.tlb.f[mmu_idx]);

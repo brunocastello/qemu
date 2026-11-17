@@ -168,15 +168,67 @@ void cpu_x86_update_cr0(CPUX86State *env, uint32_t new_cr0)
         ((new_cr0 << (HF_MP_SHIFT - 1)) & (HF_MP_MASK | HF_EM_MASK | HF_TS_MASK));
 }
 
+/*
+ * Local TCG experiments (derived from VirtualIntelMac), both off unless
+ * their environment variable is "1".  With neither set, CR3/CR4 handling is
+ * the stock one.
+ *
+ * PVG_TCG_KEEP_PHYS_TLB: a CR3 write keeps the MMU_PHYS_IDX software TLB.
+ * PVG_TCG_PCID_CONTEXTS: honour CR4.PCIDE and CR3 bit 63 (no-flush hint) by
+ * retaining software TLB contexts per CR3+PCID.  It also advertises PCID
+ * in the TCG CPUID feature set and enforces the CR0/CR3/CR4 rules for it.
+ */
+bool x86_tcg_keep_phys_tlb;
+bool x86_tcg_pcid_contexts;
+
+static void __attribute__((constructor)) init_keep_phys_tlb(void)
+{
+    const char *value = getenv("PVG_TCG_KEEP_PHYS_TLB");
+
+    x86_tcg_keep_phys_tlb = value && !strcmp(value, "1");
+    value = getenv("PVG_TCG_PCID_CONTEXTS");
+    x86_tcg_pcid_contexts = value && !strcmp(value, "1");
+}
+
 /* XXX: in legacy PAE mode, generate a GPF if reserved bits are set in
    the PDPT */
 void cpu_x86_update_cr3(CPUX86State *env, target_ulong new_cr3)
 {
+#ifndef CONFIG_USER_ONLY
+    bool pcid = x86_tcg_pcid_contexts && tcg_enabled() &&
+                (env->cr[4] & CR4_PCIDE_MASK);
+    bool preserve = pcid && ((uint64_t)new_cr3 >> 63);
+
+    /* Bit 63 is an instruction operand hint, never stored in CR3. */
+    if (pcid) {
+        new_cr3 &= ~(1ULL << 63);
+    }
+#endif
     env->cr[3] = new_cr3;
     if (env->cr[0] & CR0_PG_MASK) {
         qemu_log_mask(CPU_LOG_MMU,
                         "CR3 update: CR3=" TARGET_FMT_lx "\n", new_cr3);
-        tlb_flush(env_cpu(env));
+#ifndef CONFIG_USER_ONLY
+        if (pcid && !(env->hflags & (HF_SMM_MASK | HF_GUEST_MASK))) {
+            tlb_context_switch(env_cpu(env), new_cr3, preserve);
+        } else if (x86_tcg_keep_phys_tlb && tcg_enabled() &&
+                   !(env->hflags & HF_SMM_MASK)) {
+            /*
+             * MMU_PHYS_IDX is guest-physical -> host backing, not a cached
+             * guest page-table translation. CR3 cannot change it. Keep all
+             * other contexts (including nested) and the TB jump cache on the
+             * normal invalidation path. Memory topology, dirty tracking,
+             * A20, CR0/CR4 and explicit full invalidations are unchanged.
+             * RSM reloads CR3 before clearing HF_SMM: keep its full flush
+             * because the physical context also caches secure attributes.
+             */
+            tlb_flush_by_mmuidx(env_cpu(env),
+                ((1u << NB_MMU_MODES) - 1) & ~(1u << MMU_PHYS_IDX));
+        } else
+#endif
+        {
+            tlb_flush(env_cpu(env));
+        }
     }
 }
 
@@ -189,7 +241,8 @@ void cpu_x86_update_cr4(CPUX86State *env, uint32_t new_cr4)
 #endif
     if ((new_cr4 ^ env->cr[4]) &
         (CR4_PGE_MASK | CR4_PAE_MASK | CR4_PSE_MASK |
-         CR4_SMEP_MASK | CR4_SMAP_MASK | CR4_LA57_MASK)) {
+         CR4_SMEP_MASK | CR4_SMAP_MASK | CR4_LA57_MASK |
+         (x86_tcg_pcid_contexts ? CR4_PCIDE_MASK : 0))) {
         tlb_flush(env_cpu(env));
     }
 

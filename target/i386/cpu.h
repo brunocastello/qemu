@@ -2791,9 +2791,15 @@ static inline bool hyperv_feat_enabled(X86CPU *cpu, int feat)
     return !!(cpu->hyperv_features & BIT(feat));
 }
 
+/* PVG_TCG_PCID_CONTEXTS: opt-in PCID support for TCG, see helper.c. */
+extern bool x86_tcg_pcid_contexts;
+
 static inline uint64_t cr4_reserved_bits(CPUX86State *env)
 {
     uint64_t reserved_bits = CR4_RESERVED_MASK;
+    if (x86_tcg_pcid_contexts && !(env->features[FEAT_1_ECX] & CPUID_EXT_PCID)) {
+        reserved_bits |= CR4_PCIDE_MASK;
+    }
     if (!env->features[FEAT_XSAVE]) {
         reserved_bits |= CR4_OSXSAVE_MASK;
     }

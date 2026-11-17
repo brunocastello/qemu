@@ -39,6 +39,7 @@
 #else
 #include "hw/boards.h"
 #include "system/runstate.h"
+#include "exec/cputlb.h"
 #endif
 #include "internal-common.h"
 #include "tb-jmp-cache.h"
@@ -119,6 +120,8 @@ static int tcg_init_machine(MachineState *ms)
      * The accelerator is not a child in the public QOM tree.  Expose the
      * local comparison controls on the owning machine (for qom-set).
      */
+    object_property_add_alias(OBJECT(ms), "pvg-context-jump-cache",
+                              OBJECT(s), "context-jump-cache");
     object_property_add_alias(OBJECT(ms), "pvg-alternate-lookup",
                               OBJECT(s), "alternate-lookup");
 #endif
@@ -224,6 +227,20 @@ static void tcg_set_one_insn_per_tb(Object *obj, bool value, Error **errp)
 }
 
 #ifndef CONFIG_USER_ONLY
+static bool tcg_get_context_jump_cache(Object *obj, Error **errp)
+{
+    return tlb_context_jump_cache_enabled();
+}
+
+static void tcg_set_context_jump_cache(Object *obj, bool value, Error **errp)
+{
+    if (runstate_is_running()) {
+        error_setg(errp, "Stop the VM before changing context-jump-cache");
+        return;
+    }
+    tlb_context_jump_cache_set(value);
+}
+
 static bool tcg_get_alternate_lookup(Object *obj, Error **errp)
 {
     return pvg_alternate_lookup_enabled();
@@ -285,6 +302,12 @@ static void tcg_accel_class_init(ObjectClass *oc, void *data)
     object_class_property_set_description(oc, "one-insn-per-tb",
         "Only put one guest insn in each translation block");
 #ifndef CONFIG_USER_ONLY
+    object_class_property_add_bool(oc, "context-jump-cache",
+                                   tcg_get_context_jump_cache,
+                                   tcg_set_context_jump_cache);
+    object_class_property_set_description(oc, "context-jump-cache",
+        "Keep jump cache entries across retained PCID TLB contexts; "
+        "change only while stopped");
     object_class_property_add_bool(oc, "alternate-lookup",
                                    tcg_get_alternate_lookup,
                                    tcg_set_alternate_lookup);

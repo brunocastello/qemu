@@ -76,6 +76,11 @@ void helper_write_crN(CPUX86State *env, int reg, target_ulong t0)
 {
     switch (reg) {
     case 0:
+        /* PCIDE requires paging; only enforced for PVG_TCG_PCID_CONTEXTS. */
+        if (x86_tcg_pcid_contexts && (env->cr[4] & CR4_PCIDE_MASK) &&
+            !(t0 & CR0_PG_MASK)) {
+            raise_exception_ra(env, EXCP0D_GPF, GETPC());
+        }
         /*
         * If we reach this point, the CR0 write intercept is disabled.
         * But we could still exit if the hypervisor has requested the selective
@@ -89,7 +94,9 @@ void helper_write_crN(CPUX86State *env, int reg, target_ulong t0)
         break;
     case 3:
         if ((env->efer & MSR_EFER_LMA) &&
-                (t0 & ((~0ULL) << env_archcpu(env)->phys_bits))) {
+                (t0 & ((~0ULL) << env_archcpu(env)->phys_bits) &
+                 ~((x86_tcg_pcid_contexts && (env->cr[4] & CR4_PCIDE_MASK)) ?
+                   (1ULL << 63) : 0))) {
             cpu_vmexit(env, SVM_EXIT_ERR, 0, GETPC());
         }
         if (!(env->efer & MSR_EFER_LMA)) {
@@ -100,6 +107,11 @@ void helper_write_crN(CPUX86State *env, int reg, target_ulong t0)
     case 4:
         if (t0 & cr4_reserved_bits(env)) {
             cpu_vmexit(env, SVM_EXIT_ERR, 0, GETPC());
+        }
+        if (x86_tcg_pcid_contexts && (t0 & CR4_PCIDE_MASK) &&
+            (!(env->efer & MSR_EFER_LMA) ||
+             (!(env->cr[4] & CR4_PCIDE_MASK) && (env->cr[3] & 0xfff)))) {
+            raise_exception_ra(env, EXCP0D_GPF, GETPC());
         }
         if (((t0 ^ env->cr[4]) & CR4_LA57_MASK) &&
             (env->hflags & HF_CS64_MASK)) {

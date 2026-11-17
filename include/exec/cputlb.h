@@ -33,6 +33,14 @@ void tlb_unprotect_code(ram_addr_t ram_addr);
 #ifndef CONFIG_USER_ONLY
 void tlb_reset_dirty(CPUState *cpu, ram_addr_t start1, ram_addr_t length);
 void tlb_reset_dirty_range_all(ram_addr_t start, ram_addr_t length);
+/*
+ * Local PCID context-retention experiment (owner vCPU only).  @key is the
+ * new CR3 including the PCID; @preserve is the CR3 bit 63 hint.
+ */
+void tlb_context_switch(CPUState *cpu, uint64_t key, bool preserve);
+bool tlb_context_jump_cache_enabled(void);
+/* Caller must have stopped all vCPUs before changing this experiment. */
+void tlb_context_jump_cache_set(bool enabled);
 #endif
 
 /**

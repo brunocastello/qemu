@@ -6458,6 +6458,12 @@ uint64_t x86_cpu_get_supported_feature_word(X86CPU *cpu, FeatureWord w)
                                     wi->cpuid.reg);
     } else if (tcg_enabled()) {
         r = wi->tcg_features;
+#ifndef CONFIG_USER_ONLY
+        /* PCID is emulated only with PVG_TCG_PCID_CONTEXTS=1 (helper.c). */
+        if (w == FEAT_1_ECX && x86_tcg_pcid_contexts) {
+            r |= CPUID_EXT_PCID;
+        }
+#endif
     } else {
         return ~0;
     }
