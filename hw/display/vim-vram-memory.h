@@ -106,8 +106,10 @@ static inline void *VIMVRAMMemoryServe(void *opaque)
  * UTM: in-process mode (QEMU loads the host executor itself). UTM's QEMU is
  * app-sandboxed, which refuses bootstrap_register/look_up for arbitrary
  * names, so the server's port is handed over inside the process instead:
- * QEMU exports vim_vram_inprocess_lookup() and the executor finds it with
- * dlsym(RTLD_DEFAULT). The Mach request/reply protocol itself is unchanged.
+ * QEMU publishes the address of vim_vram_inprocess_lookup() in its own
+ * environment (VIM_VRAM_INPROCESS_LOOKUP; QEMU's export list hides the
+ * symbol from dlsym) and the executor, loaded into the same process, calls
+ * it. The Mach request/reply protocol itself is unchanged.
  */
 #include <dlfcn.h>
 typedef mach_port_t (*VIMVRAMInprocessLookupFn)(const char *service);
@@ -115,7 +117,7 @@ typedef mach_port_t (*VIMVRAMInprocessLookupFn)(const char *service);
 #define VIM_VRAM_INPROCESS_SLOTS 4
 static struct { char name[BOOTSTRAP_MAX_NAME_LEN]; mach_port_t port; } vim_vram_inprocess[VIM_VRAM_INPROCESS_SLOTS];
 static pthread_mutex_t vim_vram_inprocess_lock=PTHREAD_MUTEX_INITIALIZER;
-__attribute__((visibility("default"),used)) mach_port_t vim_vram_inprocess_lookup(const char *service)
+static mach_port_t vim_vram_inprocess_lookup(const char *service)
 {
     mach_port_t port=MACH_PORT_NULL;
     pthread_mutex_lock(&vim_vram_inprocess_lock);
@@ -134,6 +136,11 @@ static inline kern_return_t VIMVRAMInprocessRegister(const char *service,mach_po
             vim_vram_inprocess[i].port=port;kr=KERN_SUCCESS;break;
         }
     pthread_mutex_unlock(&vim_vram_inprocess_lock);
+    if(!kr){
+        char address[32];
+        snprintf(address,sizeof(address),"%p",(void *)vim_vram_inprocess_lookup);
+        setenv("VIM_VRAM_INPROCESS_LOOKUP",address,1);
+    }
     return kr;
 }
 #endif
@@ -146,7 +153,8 @@ static inline kern_return_t VIMVRAMServiceRegister(const char *service,mach_port
 }
 static inline kern_return_t VIMVRAMServiceLookUp(const char *service,mach_port_t *port)
 {
-    VIMVRAMInprocessLookupFn lookup=(VIMVRAMInprocessLookupFn)dlsym(RTLD_DEFAULT,"vim_vram_inprocess_lookup");
+    const char *address=getenv("VIM_VRAM_INPROCESS_LOOKUP");
+    VIMVRAMInprocessLookupFn lookup=address?(VIMVRAMInprocessLookupFn)(uintptr_t)strtoull(address,NULL,16):NULL;
     mach_port_t local=lookup?lookup(service):MACH_PORT_NULL;
     if(local!=MACH_PORT_NULL){
         /* our own send right, released by the caller like a looked-up one */

@@ -1727,6 +1727,35 @@ static void vmsvga_passthrough_opengl_default_env(void)
     setenv("VIM_PASSTHROUGH_OPENGL_INLINE", "1", 0);
     setenv("VIM_PASSTHROUGH_OPENGL_SURFACE_IMPORT", "1", 0);
     setenv("VIM_OPENGL_VRAM_SERVICE", service, 0);
+
+    /*
+     * The executor maps guest VRAM/RAM only when VIM_OPENGL_VRAM_ENDPOINT
+     * names a private plist describing the service (VirtualIntelMac's app
+     * writes it); otherwise it falls back to copied graphics.
+     */
+    if (!getenv("VIM_OPENGL_VRAM_ENDPOINT")) {
+        g_autofree char *dir = g_strdup_printf("%s/vim-%d", g_get_tmp_dir(), getpid());
+        g_autofree char *endpoint = g_build_filename(dir, "vram-endpoint.plist", NULL);
+        g_autofree char *plist = g_strdup_printf(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+            "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" "
+            "\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
+            "<plist version=\"1.0\"><dict>"
+            "<key>Version</key><integer>1</integer>"
+            "<key>Service</key><string>%s</string>"
+            "<key>RendererPID</key><integer>%d</integer>"
+            "<key>ProducerPID</key><integer>%d</integer>"
+            "</dict></plist>\n", getenv("VIM_OPENGL_VRAM_SERVICE"),
+            getpid(), getpid());
+        if (g_mkdir_with_parents(dir, 0700) == 0 && chmod(dir, 0700) == 0 &&
+            g_file_set_contents(endpoint, plist, -1, NULL) &&
+            chmod(endpoint, 0600) == 0) {
+            setenv("VIM_OPENGL_VRAM_ENDPOINT", endpoint, 1);
+        } else {
+            warn_report("vmware-svga: could not write %s; "
+                        "PassthroughOpenGL uses copied graphics", endpoint);
+        }
+    }
 }
 #endif
 
