@@ -209,6 +209,86 @@ void translator_lookup_and_goto_ptr(DisasContextBase *db, TCGv_i64 pc)
     tcg_gen_lookup_and_goto_ptr();
 }
 
+/*
+ * Like translator_lookup_and_goto_ptr(), for targets whose TB flags change
+ * inside a TB (x86): the caller computes the CPU's current @flags and
+ * passes the constant @cs_base the CPU will have.  CF_PCREL is allowed, the
+ * entry's pc is the full pc either way.  Additionally falls back to the
+ * helper at run time while the vCPU has any breakpoint, which the helper
+ * checks before it enters the target block.
+ * (Derived from VirtualIntelMac's gen_cached_indirect_jump.)
+ */
+void translator_lookup_and_goto_ptr_flags(DisasContextBase *db, TCGv_i64 pc,
+                                          uint64_t cs_base, TCGv_i32 flags)
+{
+    TranslationBlock *tb = db->tb;
+    uint32_t cf = tb_cflags(tb);
+    const size_t esz = sizeof(((CPUJumpCache *)0)->array[0]);
+    const ptrdiff_t cpu_off = -offsetof(ArchCPU, env);
+    TCGLabel *miss;
+    TCGv_i64 h, t;
+    TCGv_ptr jc, e, next;
+    TCGv_i32 a, b;
+
+    if ((cf & (CF_COUNT_MASK | CF_NO_GOTO_TB | CF_NO_GOTO_PTR | CF_SINGLE_STEP |
+               CF_MEMI_ONLY | CF_USE_ICOUNT | CF_NOIRQ | CF_BP_PAGE)) ||
+        db->plugin_enabled || qemu_loglevel_mask(CPU_LOG_TB_CPU | CPU_LOG_EXEC)) {
+        tcg_gen_lookup_and_goto_ptr();
+        return;
+    }
+
+    miss = gen_new_label();
+    h = tcg_temp_new_i64();
+    t = tcg_temp_new_i64();
+    jc = tcg_temp_new_ptr();
+    e = tcg_temp_new_ptr();
+    next = tcg_temp_new_ptr();
+    a = tcg_temp_new_i32();
+    b = tcg_temp_new_i32();
+
+    tcg_gen_ld_ptr(next, tcg_env,
+                   cpu_off + offsetof(ArchCPU, parent_obj.breakpoints.tqh_first));
+    tcg_gen_brcondi_ptr(TCG_COND_NE, next, 0, miss);
+
+    /* tb_jmp_cache_hash_func(pc) * esz */
+    tcg_gen_shri_i64(t, pc, TARGET_PAGE_BITS - TB_JMP_PAGE_BITS);
+    tcg_gen_xor_i64(t, t, pc);
+    tcg_gen_shri_i64(h, t, TARGET_PAGE_BITS - TB_JMP_PAGE_BITS);
+    tcg_gen_andi_i64(h, h, TB_JMP_PAGE_MASK);
+    tcg_gen_andi_i64(t, t, TB_JMP_ADDR_MASK);
+    tcg_gen_or_i64(h, h, t);
+    tcg_gen_muli_i64(h, h, esz);
+
+    tcg_gen_ld_ptr(jc, tcg_env,
+                   cpu_off + offsetof(ArchCPU, parent_obj.tb_jmp_cache));
+    tcg_gen_trunc_i64_ptr(e, h);
+    tcg_gen_add_ptr(e, e, jc);
+
+    tcg_gen_ld_ptr(next, e, offsetof(CPUJumpCache, array[0].tb));
+    tcg_gen_brcondi_ptr(TCG_COND_EQ, next, 0, miss);
+    tcg_gen_ld_i32(a, e, offsetof(CPUJumpCache, array[0].gen));
+    tcg_gen_ld_i32(b, jc, offsetof(CPUJumpCache, gen));
+    tcg_gen_brcond_i32(TCG_COND_NE, a, b, miss);
+    tcg_gen_ld_i32(a, e, offsetof(CPUJumpCache, array[0].ctx));
+    tcg_gen_ld_i32(b, jc, offsetof(CPUJumpCache, ctx));
+    tcg_gen_brcond_i32(TCG_COND_NE, a, b, miss);
+    tcg_gen_ld_i64(t, e, offsetof(CPUJumpCache, array[0].pc));
+    tcg_gen_brcond_i64(TCG_COND_NE, t, pc, miss);
+    tcg_gen_ld_i64(t, next, offsetof(TranslationBlock, cs_base));
+    tcg_gen_brcondi_i64(TCG_COND_NE, t, cs_base, miss);
+    tcg_gen_ld_i32(a, next, offsetof(TranslationBlock, flags));
+    tcg_gen_brcond_i32(TCG_COND_NE, a, flags, miss);
+    /* The cflags the helper would use: an ordinary vCPU's tcg_cflags. */
+    tcg_gen_ld_i32(a, next, offsetof(TranslationBlock, cflags));
+    tcg_gen_ld_i32(b, tcg_env, cpu_off + offsetof(ArchCPU, parent_obj.tcg_cflags));
+    tcg_gen_brcond_i32(TCG_COND_NE, a, b, miss);
+    tcg_gen_ld_ptr(next, next, offsetof(TranslationBlock, tc.ptr));
+    tcg_gen_goto_ptr(next);
+
+    gen_set_label(miss);
+    tcg_gen_lookup_and_goto_ptr();
+}
+
 void translator_loop(CPUState *cpu, TranslationBlock *tb, int *max_insns,
                      vaddr pc, void *host_pc, const TranslatorOps *ops,
                      DisasContextBase *db)

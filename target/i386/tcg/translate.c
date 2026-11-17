@@ -34,6 +34,20 @@
 
 #include "exec/log.h"
 
+/*
+ * PVG_TCG_INLINE_JMP_CACHE=1: probe the TB jump cache inline for indirect
+ * jumps in 64-bit ring 3 code (derived from VirtualIntelMac).  Off by
+ * default: indirect jumps use tcg_gen_lookup_and_goto_ptr() as before.
+ */
+static bool emit_inline_jmp_cache;
+
+static void __attribute__((constructor)) init_inline_jmp_cache(void)
+{
+    const char *value = getenv("PVG_TCG_INLINE_JMP_CACHE");
+
+    emit_inline_jmp_cache = value && !strcmp(value, "1");
+}
+
 #define HELPER_H "helper.h"
 #include "exec/helper-info.c.inc"
 #undef  HELPER_H
@@ -2245,6 +2259,34 @@ static void gen_bnd_jmp(DisasContext *s)
     }
 }
 
+/* Mirror tb_lookup's checked fast hit without a C helper round trip. */
+static void gen_cached_indirect_jump(DisasContext *s)
+{
+#if defined(TARGET_X86_64) && !defined(CONFIG_USER_ONLY)
+    /*
+     * Kernel CR3 transitions have cold jump caches: duplicating the lookup
+     * before a miss adds cost there. Target hot userspace indirect calls.
+     */
+    if (emit_inline_jmp_cache && (s->flags & HF_CS64_MASK) &&
+        (s->flags & HF_CPL_MASK) == 3 &&
+        !(s->base.tb->cflags & CF_NO_GOTO_PTR)) {
+        TCGv_i32 flags = tcg_temp_new_i32();
+        TCGv_i32 other = tcg_temp_new_i32();
+
+        /* cpu_get_tb_cpu_state(): hflags plus these eflags bits. */
+        tcg_gen_ld_i32(flags, tcg_env, offsetof(CPUX86State, eflags));
+        tcg_gen_andi_i32(flags, flags,
+                         IOPL_MASK | TF_MASK | RF_MASK | VM_MASK | AC_MASK);
+        tcg_gen_ld_i32(other, tcg_env, offsetof(CPUX86State, hflags));
+        tcg_gen_or_i32(flags, flags, other);
+        /* In 64-bit mode cs_base is 0 and the pc is eip. */
+        translator_lookup_and_goto_ptr_flags(&s->base, cpu_eip, 0, flags);
+        return;
+    }
+#endif
+    tcg_gen_lookup_and_goto_ptr();
+}
+
 /*
  * Generate an end of block, including common tasks such as generating
  * single step traps, resetting the RF flag, and handling the interrupt
@@ -2277,7 +2319,7 @@ gen_eob(DisasContext *s, int mode)
     } else if (mode == DISAS_JUMP &&
                /* give irqs a chance to happen */
                !inhibit_reset) {
-        tcg_gen_lookup_and_goto_ptr();
+        gen_cached_indirect_jump(s);
     } else {
         tcg_gen_exit_tb(NULL, 0);
     }

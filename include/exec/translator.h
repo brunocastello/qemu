@@ -171,6 +171,21 @@ struct TCGv_i64_d;
 void translator_lookup_and_goto_ptr(DisasContextBase *db, struct TCGv_i64_d *pc);
 
 /**
+ * translator_lookup_and_goto_ptr_flags
+ * @db: Disassembly context
+ * @pc: the next pc, as the CPU state already holds it
+ * @cs_base: the cs_base the CPU will have
+ * @flags: the CPU's current TB flags, computed by the caller
+ *
+ * As above, for targets whose flags can change inside a TB.
+ */
+struct TCGv_i32_d;
+void translator_lookup_and_goto_ptr_flags(DisasContextBase *db,
+                                          struct TCGv_i64_d *pc,
+                                          uint64_t cs_base,
+                                          struct TCGv_i32_d *flags);
+
+/**
  * translator_io_start
  * @db: Disassembly context
  *
