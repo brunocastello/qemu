@@ -6,6 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       runner: { description: 'runner label', default: 'xcode-27' }
+      all_targets: { description: 'compile every softmmu target (UTM build coverage)', type: boolean, default: false }
   push:
     branches: [intel-vim]
 env:
@@ -43,10 +44,10 @@ jobs:
       - name: Configure and build
         run: |
           mkdir build && cd build
-          ../configure --python=/tmp/venv/bin/python3 --target-list=x86_64-softmmu,ppc-softmmu \
+          ../configure --python=/tmp/venv/bin/python3 ${{ inputs.all_targets && '--disable-user' || '--target-list=x86_64-softmmu,ppc-softmmu' }} \
             --disable-docs --disable-sdl --disable-werror -Doptimization=2 --enable-spice --disable-dbus-display --disable-opengl \
             -Dhvdbt_engine="$GITHUB_WORKSPACE/vim/Source/HybridHypervisor"
-          ninja qemu-system-x86_64 qemu-system-ppc qemu-img
+          if [ "${{ inputs.all_targets }}" = true ]; then ninja; else ninja qemu-system-x86_64 qemu-system-ppc qemu-img; fi
       - name: Bundle
         run: |
           mkdir -p dist/lib
