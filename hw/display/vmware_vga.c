@@ -1801,6 +1801,9 @@ static void vmsvga_passthrough_opengl_default_env(void)
     setenv("VIM_PASSTHROUGH_OPENGL_INPROCESS_LIBRARY", real ? real : found, 1);
     setenv("VIM_PASSTHROUGH_OPENGL_INLINE", "1", 0);
     setenv("VIM_PASSTHROUGH_OPENGL_SURFACE_IMPORT", "1", 0);
+    /* VirtualIntelMac's display cadence: publish on SVGA SYNC, 16 ms tick */
+    setenv("VIM_DISPLAY_EVENT_DRIVEN", "1", 0);
+    setenv("VIM_DISPLAY_REFRESH_MS", "16", 0);
     setenv("VIM_OPENGL_VRAM_SERVICE", service, 0);
 
     /*
