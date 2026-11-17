@@ -2666,6 +2666,8 @@ if xen.found()
   config_host_data.set('CONFIG_XEN_CTRL_INTERFACE_VERSION', xen_ctrl_version)
 endif
 config_host_data.set('CONFIG_METAL', metal.found())
+# vmware-svga's in-process IOSurface display owner (hw/display/vmware_vga_gpu.c)
+config_host_data.set('CONFIG_VMSVGA_GPU_DISPLAY', host_os == 'darwin' and metal.found() and iosurface.found())
 config_host_data.set('QEMU_VERSION', '"@0@"'.format(meson.project_version()))
 config_host_data.set('QEMU_VERSION_MAJOR', meson.project_version().split('.')[0])
 config_host_data.set('QEMU_VERSION_MINOR', meson.project_version().split('.')[1])

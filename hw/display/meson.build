@@ -122,6 +122,12 @@ if host_os == 'darwin'
   if metal_fw.found()
     system_ss.add(when: 'CONFIG_PPC_MAC_GPU', if_true: [files('ppc_mac_gpu_metal.m'), metal_fw])
   endif
+  # vmware-svga hands the PassthroughOpenGL executor's IOSurface frames to the
+  # console as Metal scanout textures; vmware_vga.c tests CONFIG_VMSVGA_GPU_DISPLAY
+  if metal_fw.found() and iosurface.found()
+    system_ss.add(when: 'CONFIG_VMWARE_VGA', if_true: [
+      files('vmware_vga_gpu.c', 'vmware_vga_metal.m'), metal_fw, iosurface])
+  endif
 endif
 
 system_ss.add(when: [pvg, 'CONFIG_MAC_PVG_PCI'],     if_true: [files('apple-gfx.m', 'apple-gfx-pci.m')])
