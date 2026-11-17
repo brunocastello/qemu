@@ -1,0 +1,55 @@
+name: Build qemu-system-x86_64 + PassthroughOpenGL host (macOS arm64, self-contained)
+# Intel phase test build: VMware SVGA II with the VirtualIntelMac PassthroughOpenGL
+# bridge (hw/display/vmware_vga.c) plus the host executor libVIMPassthroughOpenGLHost.dylib,
+# built unchanged from nfzerox/VirtualIntelMacOnAppleSilicon (MIT) at a pinned commit.
+on:
+  workflow_dispatch:
+    inputs:
+      runner: { description: 'runner label', default: 'macos-15' }
+  push:
+    branches: [intel-vim]
+env:
+  VIM_REPO: https://github.com/nfzerox/VirtualIntelMacOnAppleSilicon.git
+  VIM_COMMIT: 979c3a247aea5946a89a4a42dd61bbafe3e2cbbc
+jobs:
+  build:
+    runs-on: ${{ inputs.runner || 'macos-15' }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 1 }
+      - name: Dependencies
+        run: |
+          brew install ninja pkgconf glib pixman libslirp dylibbundler spice-protocol spice-server
+          python3 -m venv /tmp/venv && /tmp/venv/bin/pip install -q distlib tomli
+      - name: PassthroughOpenGL host executor
+        run: |
+          git init -q vim && cd vim
+          git remote add origin "$VIM_REPO"
+          git sparse-checkout set Source/PassthroughOpenGL Source/scripts Source/prebuilt/PassthroughOpenGL/common \
+            Source/vendor/qemu/include/hw/display Source/vendor/qemu/hw/display Source/vendor/source/VMsvga2 Source/probes Source/tools
+          git fetch -q --depth 1 --filter=blob:none origin "$VIM_COMMIT" && git checkout -q FETCH_HEAD
+          python3 Source/scripts/build-opengl-host.py --output "$GITHUB_WORKSPACE/hostlib"
+          lipo -archs "$GITHUB_WORKSPACE/hostlib/libVIMPassthroughOpenGLHost.dylib"
+      - name: Configure and build
+        run: |
+          mkdir build && cd build
+          ../configure --python=/tmp/venv/bin/python3 --target-list=x86_64-softmmu \
+            --disable-docs --disable-sdl --disable-werror -Doptimization=2 --enable-spice --disable-dbus-display --disable-opengl
+          ninja qemu-system-x86_64 qemu-img
+      - name: Bundle
+        run: |
+          mkdir -p dist/lib
+          cp build/qemu-system-x86_64 build/qemu-img dist/
+          cp hostlib/libVIMPassthroughOpenGLHost.dylib dist/
+          dylibbundler -of -b -x dist/qemu-system-x86_64 -x dist/qemu-img -d dist/lib -p @executable_path/lib/
+          for f in dist/qemu-system-x86_64 dist/qemu-img dist/lib/*.dylib; do
+            while [ "$(otool -l "$f" | grep -c 'path @executable_path/lib/')" -gt 1 ]; do
+              install_name_tool -delete_rpath @executable_path/lib/ "$f"; done; done
+          cp -R pc-bios dist/pc-bios
+          for f in dist/qemu-system-x86_64 dist/qemu-img dist/libVIMPassthroughOpenGLHost.dylib dist/lib/*.dylib; do codesign -f -s - "$f"; done
+          otool -L dist/qemu-system-x86_64 | grep -v -E "@executable_path|/usr/lib|/System" && echo "UNBUNDLED DEPS ABOVE" || echo "all deps bundled"
+          tar -czf qemu-x86-vim-macos-arm64.tgz -C dist .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: qemu-x86-vim-macos-arm64
+          path: qemu-x86-vim-macos-arm64.tgz
