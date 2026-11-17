@@ -827,6 +827,8 @@ static const VMStateDescription vmstate_ich9_lpc = {
 };
 
 static const Property ich9_lpc_properties[] = {
+    DEFINE_PROP_BOOL("x-apic-pirq-f-native-only", ICH9LPCState,
+                     apic_pirq_f_native_only, false),
     DEFINE_PROP_BOOL("noreboot", ICH9LPCState, pin_strap.spkr_hi, false),
     DEFINE_PROP_BOOL("smm-compat", ICH9LPCState, pm.smm_compat, false),
     DEFINE_PROP_BOOL("smm-enabled", ICH9LPCState, pm.smm_enabled, false),
