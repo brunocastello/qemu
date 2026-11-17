@@ -1506,7 +1506,8 @@ static bool vmsvga_update_display(void *opaque)
 
     if (!s->enable || !s->config) {
         /* in standard vga mode */
-        return s->vga.hw_ops->gfx_update(&s->vga);
+        s->vga.hw_ops->gfx_update(&s->vga);
+        return true;
     }
 
     if (!vmsvga_check_size(s)) {
@@ -1615,7 +1616,7 @@ static const VMStateDescription vmstate_vmware_vga_internal = {
     .minimum_version_id = 0,
     .post_load = vmsvga_post_load,
     .fields = (const VMStateField[]) {
-        VMSTATE_INT32_EQUAL(new_depth, struct vmsvga_state_s),
+        VMSTATE_INT32_EQUAL(new_depth, struct vmsvga_state_s, NULL),
         VMSTATE_INT32(enable, struct vmsvga_state_s),
         VMSTATE_INT32(config, struct vmsvga_state_s),
         VMSTATE_INT32(cursor.id, struct vmsvga_state_s),
@@ -1652,7 +1653,7 @@ static void vmsvga_ui_info(void *opaque, uint32_t head, QemuUIInfo *info)
 {
     struct vmsvga_state_s *s = opaque;
     uint32_t width = info->width, height = info->height;
-    uint32_t scale = info->logical_scale;
+    uint32_t scale = 1; /* QEMU 10.0's QemuUIInfo has no logical_scale */
 
     /* Local research only. Immutable native-panel metadata remains separate
      * from the coalesced requested mode. No frame-time guest polling. */
@@ -1675,9 +1676,15 @@ static void vmsvga_ui_info(void *opaque, uint32_t head, QemuUIInfo *info)
     }
 }
 
+/* QEMU 10.0: gfx_update returns void (11.1: bool). */
+static void vmsvga_update_display_void(void *opaque)
+{
+    vmsvga_update_display(opaque);
+}
+
 static const GraphicHwOps vmsvga_ops = {
     .invalidate  = vmsvga_invalidate_display,
-    .gfx_update  = vmsvga_update_display,
+    .gfx_update  = vmsvga_update_display_void,
     .text_update = vmsvga_text_update,
     .ui_info     = vmsvga_ui_info,
 };
