@@ -468,6 +468,9 @@ void glue(helper_pshufhw, SUFFIX)(Reg *d, Reg *s, int order)
             Reg *d, Reg *v, Reg *s)                                     \
     {                                                                   \
         int i;                                                          \
+        if (sse_native_packed(env, d, v, s, 32, SHIFT, SSE_NATIVE_##name)) { \
+            return;                                                     \
+        }                                                               \
         for (i = 0; i < 2 << SHIFT; i++) {                              \
             d->ZMM_S(i) = F(32, v->ZMM_S(i), s->ZMM_S(i));              \
         }                                                               \
@@ -477,6 +480,9 @@ void glue(helper_pshufhw, SUFFIX)(Reg *d, Reg *s, int order)
             Reg *d, Reg *v, Reg *s)                                     \
     {                                                                   \
         int i;                                                          \
+        if (sse_native_packed(env, d, v, s, 64, SHIFT, SSE_NATIVE_##name)) { \
+            return;                                                     \
+        }                                                               \
         for (i = 0; i < 1 << SHIFT; i++) {                              \
             d->ZMM_D(i) = F(64, v->ZMM_D(i), s->ZMM_D(i));              \
         }                                                               \
@@ -490,7 +496,9 @@ void glue(helper_pshufhw, SUFFIX)(Reg *d, Reg *s, int order)
     void helper_ ## name ## ss(CPUX86State *env, Reg *d, Reg *v, Reg *s)\
     {                                                                   \
         int i;                                                          \
-        d->ZMM_S(0) = F(32, v->ZMM_S(0), s->ZMM_S(0));                  \
+        if (!sse_native_scalar_exact(env, d, v, s, 32, SSE_NATIVE_##name)) { \
+            d->ZMM_S(0) = F(32, v->ZMM_S(0), s->ZMM_S(0));                \
+        }                                                               \
         for (i = 1; i < 2 << SHIFT; i++) {                              \
             d->ZMM_L(i) = v->ZMM_L(i);                                  \
         }                                                               \
@@ -499,7 +507,9 @@ void glue(helper_pshufhw, SUFFIX)(Reg *d, Reg *s, int order)
     void helper_ ## name ## sd(CPUX86State *env, Reg *d, Reg *v, Reg *s)\
     {                                                                   \
         int i;                                                          \
-        d->ZMM_D(0) = F(64, v->ZMM_D(0), s->ZMM_D(0));                  \
+        if (!sse_native_scalar_exact(env, d, v, s, 64, SSE_NATIVE_##name)) { \
+            d->ZMM_D(0) = F(64, v->ZMM_D(0), s->ZMM_D(0));                \
+        }                                                               \
         for (i = 1; i < 1 << SHIFT; i++) {                              \
             d->ZMM_Q(i) = v->ZMM_Q(i);                                  \
         }                                                               \
