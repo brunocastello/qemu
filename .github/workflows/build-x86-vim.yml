@@ -19,7 +19,7 @@ jobs:
         with: { fetch-depth: 1 }
       - name: Dependencies
         run: |
-          brew install ninja pkgconf glib pixman libslirp dylibbundler spice-protocol spice-server shaderc
+          brew install ninja pkgconf glib pixman libslirp dylibbundler spice-protocol spice-server shaderc spirv-cross
           python3 -m venv /tmp/venv && /tmp/venv/bin/pip install -q distlib tomli
       - name: PassthroughOpenGL host executor
         run: |
