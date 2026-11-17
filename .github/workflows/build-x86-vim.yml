@@ -35,9 +35,9 @@ jobs:
       - name: Configure and build
         run: |
           mkdir build && cd build
-          ../configure --python=/tmp/venv/bin/python3 --target-list=x86_64-softmmu \
+          ../configure --python=/tmp/venv/bin/python3 --target-list=x86_64-softmmu,ppc-softmmu \
             --disable-docs --disable-sdl --disable-werror -Doptimization=2 --enable-spice --disable-dbus-display --disable-opengl
-          ninja qemu-system-x86_64 qemu-img
+          ninja qemu-system-x86_64 qemu-system-ppc qemu-img
       - name: Bundle
         run: |
           mkdir -p dist/lib
