@@ -10,7 +10,7 @@ on:
     branches: [intel-vim]
 env:
   VIM_REPO: https://github.com/nfzerox/VirtualIntelMacOnAppleSilicon.git
-  VIM_COMMIT: 979c3a247aea5946a89a4a42dd61bbafe3e2cbbc
+  VIM_COMMIT: 2861da9e265e557aef90319e4451487ed1fed553
 jobs:
   build:
     runs-on: ${{ inputs.runner || 'macos-15' }}
