@@ -46,6 +46,7 @@
 #include <netinet/tcp.h>
 #include "vmware_passthrough_opengl_transport.h"
 #ifdef __APPLE__
+#define VIM_VRAM_INPROCESS_PROVIDER 1 /* exports vim_vram_inprocess_lookup */
 #include "vim-vram-memory.h"
 #endif
 
@@ -1689,9 +1690,54 @@ static const GraphicHwOps vmsvga_ops = {
     .ui_info     = vmsvga_ui_info,
 };
 
+#ifdef __APPLE__
+/*
+ * UTM: with passthrough-opengl-bridge=on and no explicit
+ * VIM_PASSTHROUGH_OPENGL_INPROCESS_LIBRARY, use the host executor shipped
+ * next to QEMU -- the app's Frameworks/VIMPassthroughOpenGLHost.framework
+ * (UTM) or libVIMPassthroughOpenGLHost.dylib beside the binary (standalone)
+ * -- with the defaults VirtualIntelMac's launcher sets for it.
+ */
+static void vmsvga_passthrough_opengl_default_env(void)
+{
+    Dl_info info;
+    if (getenv("VIM_PASSTHROUGH_OPENGL_INPROCESS_LIBRARY") ||
+        !dladdr((const void *)vmsvga_passthrough_opengl_default_env, &info) ||
+        !info.dli_fname) {
+        return;
+    }
+    g_autofree char *bin_dir = g_path_get_dirname(info.dli_fname);
+    /* .../Frameworks/qemu-x-softmmu.framework/Versions/A/<binary> */
+    g_autofree char *frameworks = g_build_filename(bin_dir, "..", "..", "..", NULL);
+    g_autofree char *in_app = g_build_filename(frameworks,
+        "VIMPassthroughOpenGLHost.framework", "Versions", "A",
+        "VIMPassthroughOpenGLHost", NULL);
+    g_autofree char *beside = g_build_filename(bin_dir,
+        "libVIMPassthroughOpenGLHost.dylib", NULL);
+    const char *found = g_file_test(in_app, G_FILE_TEST_EXISTS) ? in_app :
+                        g_file_test(beside, G_FILE_TEST_EXISTS) ? beside : NULL;
+    if (!found) {
+        warn_report("vmware-svga: passthrough-opengl-bridge=on but no "
+                    "libVIMPassthroughOpenGLHost found next to QEMU");
+        return;
+    }
+    g_autofree char *real = realpath(found, NULL);
+    g_autofree char *service = g_strdup_printf("com.utmapp.vim.ram.%d", getpid());
+    setenv("VIM_PASSTHROUGH_OPENGL_INPROCESS_LIBRARY", real ? real : found, 1);
+    setenv("VIM_PASSTHROUGH_OPENGL_INLINE", "1", 0);
+    setenv("VIM_PASSTHROUGH_OPENGL_SURFACE_IMPORT", "1", 0);
+    setenv("VIM_OPENGL_VRAM_SERVICE", service, 0);
+}
+#endif
+
 static void vmsvga_init(DeviceState *dev, struct vmsvga_state_s *s,
                         MemoryRegion *address_space, MemoryRegion *io)
 {
+#ifdef __APPLE__
+    if (s->passthrough_opengl_bridge) {
+        vmsvga_passthrough_opengl_default_env();
+    }
+#endif
     s->legacy_event_scanout = s->passthrough_opengl_bridge &&
         g_strcmp0(getenv("VIM_DISPLAY_EVENT_DRIVEN"), "1") == 0;
     s->scratch_size = SVGA_SCRATCH_SIZE;

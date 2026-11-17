@@ -102,6 +102,60 @@ static inline void *VIMVRAMMemoryServe(void *opaque)
     }
     return NULL;
 }
+/*
+ * UTM: in-process mode (QEMU loads the host executor itself). UTM's QEMU is
+ * app-sandboxed, which refuses bootstrap_register/look_up for arbitrary
+ * names, so the server's port is handed over inside the process instead:
+ * QEMU exports vim_vram_inprocess_lookup() and the executor finds it with
+ * dlsym(RTLD_DEFAULT). The Mach request/reply protocol itself is unchanged.
+ */
+#include <dlfcn.h>
+typedef mach_port_t (*VIMVRAMInprocessLookupFn)(const char *service);
+#ifdef VIM_VRAM_INPROCESS_PROVIDER
+#define VIM_VRAM_INPROCESS_SLOTS 4
+static struct { char name[BOOTSTRAP_MAX_NAME_LEN]; mach_port_t port; } vim_vram_inprocess[VIM_VRAM_INPROCESS_SLOTS];
+static pthread_mutex_t vim_vram_inprocess_lock=PTHREAD_MUTEX_INITIALIZER;
+__attribute__((visibility("default"),used)) mach_port_t vim_vram_inprocess_lookup(const char *service)
+{
+    mach_port_t port=MACH_PORT_NULL;
+    pthread_mutex_lock(&vim_vram_inprocess_lock);
+    for(unsigned i=0;service&&i<VIM_VRAM_INPROCESS_SLOTS;++i)
+        if(vim_vram_inprocess[i].port&&!strcmp(vim_vram_inprocess[i].name,service))port=vim_vram_inprocess[i].port;
+    pthread_mutex_unlock(&vim_vram_inprocess_lock);
+    return port;
+}
+static inline kern_return_t VIMVRAMInprocessRegister(const char *service,mach_port_t port)
+{
+    kern_return_t kr=KERN_NO_SPACE;
+    pthread_mutex_lock(&vim_vram_inprocess_lock);
+    for(unsigned i=0;i<VIM_VRAM_INPROCESS_SLOTS;++i)
+        if(!vim_vram_inprocess[i].port){
+            strncpy(vim_vram_inprocess[i].name,service,sizeof(vim_vram_inprocess[i].name)-1);
+            vim_vram_inprocess[i].port=port;kr=KERN_SUCCESS;break;
+        }
+    pthread_mutex_unlock(&vim_vram_inprocess_lock);
+    return kr;
+}
+#endif
+static inline kern_return_t VIMVRAMServiceRegister(const char *service,mach_port_t port)
+{
+#ifdef VIM_VRAM_INPROCESS_PROVIDER
+    if(getenv("VIM_PASSTHROUGH_OPENGL_INPROCESS_LIBRARY"))return VIMVRAMInprocessRegister(service,port);
+#endif
+    return bootstrap_register(bootstrap_port,(char *)service,port);
+}
+static inline kern_return_t VIMVRAMServiceLookUp(const char *service,mach_port_t *port)
+{
+    VIMVRAMInprocessLookupFn lookup=(VIMVRAMInprocessLookupFn)dlsym(RTLD_DEFAULT,"vim_vram_inprocess_lookup");
+    mach_port_t local=lookup?lookup(service):MACH_PORT_NULL;
+    if(local!=MACH_PORT_NULL){
+        /* our own send right, released by the caller like a looked-up one */
+        kern_return_t kr=mach_port_mod_refs(mach_task_self(),local,MACH_PORT_RIGHT_SEND,1);
+        if(!kr)*port=local;
+        return kr;
+    }
+    return bootstrap_look_up(bootstrap_port,(char *)service,port);
+}
 static inline struct VIMVRAMMemoryServer *VIMVRAMMemoryServerStartWithRanges(
     const char *service,pid_t consumer,void *address,uint64_t bytes,
     const struct VIMSharedRAMRange *ranges,unsigned count)
@@ -126,7 +180,7 @@ static inline struct VIMVRAMMemoryServer *VIMVRAMMemoryServerStartWithRanges(
     if(
        mach_port_allocate(mach_task_self(),MACH_PORT_RIGHT_RECEIVE,&s->receive) ||
        mach_port_insert_right(mach_task_self(),s->receive,s->receive,MACH_MSG_TYPE_MAKE_SEND) ||
-       bootstrap_register(bootstrap_port,(char *)service,s->receive) ||
+       VIMVRAMServiceRegister(service,s->receive) ||
        pthread_create(&s->thread,NULL,VIMVRAMMemoryServe,s)){
         if(s->receive)mach_port_destroy(mach_task_self(),s->receive);
         if(s->memory)mach_port_deallocate(mach_task_self(),s->memory);free(s);return NULL;
@@ -153,7 +207,7 @@ static inline kern_return_t VIMVRAMMemoryImport(const char *service,pid_t produc
 {
     if(!out || out->address || out->bytes || !service || producer<=0)return KERN_INVALID_ARGUMENT;
     mach_port_t server=0,receive=0;
-    kern_return_t kr=bootstrap_look_up(bootstrap_port,(char *)service,&server);if(kr)return kr;
+    kern_return_t kr=VIMVRAMServiceLookUp(service,&server);if(kr)return kr;
     kr=mach_port_allocate(mach_task_self(),MACH_PORT_RIGHT_RECEIVE,&receive);
     if(kr){mach_port_deallocate(mach_task_self(),server);return kr;}
     mach_msg_header_t h;memset(&h,0,sizeof(h));h.msgh_remote_port=server;h.msgh_local_port=receive;
