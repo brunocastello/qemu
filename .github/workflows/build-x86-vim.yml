@@ -44,10 +44,12 @@ jobs:
       - name: Configure and build
         run: |
           mkdir build && cd build
+          # UTM builds for macOS 12 (apple-gfx uses APIs removed in the macOS 27 SDK target)
+          [ "${{ inputs.all_targets }}" = true ] && export MACOSX_DEPLOYMENT_TARGET=12.0
           ../configure --python=/tmp/venv/bin/python3 ${{ inputs.all_targets && '--disable-user' || '--target-list=x86_64-softmmu,ppc-softmmu' }} \
             --disable-docs --disable-sdl --disable-werror -Doptimization=2 --enable-spice --disable-dbus-display --disable-opengl \
             -Dhvdbt_engine="$GITHUB_WORKSPACE/vim/Source/HybridHypervisor"
-          if [ "${{ inputs.all_targets }}" = true ]; then ninja; else ninja qemu-system-x86_64 qemu-system-ppc qemu-img; fi
+          if [ "${{ inputs.all_targets }}" = true ]; then ninja -k 0; else ninja qemu-system-x86_64 qemu-system-ppc qemu-img; fi
       - name: Bundle
         run: |
           mkdir -p dist/lib
