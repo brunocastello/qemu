@@ -83,15 +83,28 @@ static void *gpu_receive_thread(void *opaque)
         IOSurfaceRef surface;
         kern_return_t kr = VIMSurfaceFrameReceive(g->port, user, renderer,
                                                   &msg, &surface, 250);
-        if (kr == MACH_RCV_TIMED_OUT || kr == KERN_INVALID_ARGUMENT) {
-            continue; /* nothing yet, or a bad message that was destroyed */
+        if (kr == MACH_RCV_TIMED_OUT) {
+            continue; /* nothing yet */
+        }
+        if (kr == KERN_INVALID_ARGUMENT) {
+            /* a bad message, already destroyed */
+            warn_report_once("vmware-svga: rejected a GPU frame message "
+                             "(format, sender or IOSurface lookup)");
+            continue;
         }
         if (kr) {
             if (kr == MACH_RCV_TOO_LARGE) {
                 error_report("vmware-svga: oversized message on the display "
                              "port; GPU display stopped");
+            } else if (!qatomic_read(&g->stopping)) {
+                error_report("vmware-svga: GPU display port receive failed "
+                             "(0x%x); GPU display stopped", kr);
             }
             break; /* port destroyed, or unusable */
+        }
+        if (!generation) {
+            info_report("vmware-svga: first GPU frame received (%ux%u)",
+                        msg.width, msg.height);
         }
         if (msg.generation < generation ||
             (msg.generation == generation && msg.ticket <= ticket)) {
@@ -157,8 +170,24 @@ static void gpu_present_bh(void *opaque)
     if (!f) {
         return;
     }
-    if (!console_has_gl(g->con) || !gpu_frame_valid(f) ||
-        !(f->texture = vmsvga_metal_texture_create(f->surface))) {
+    if (!console_has_gl(g->con)) {
+        warn_report_once("vmware-svga: GPU frame skipped: the display has no GL");
+        gpu_frame_release(f, VIMSurfaceSkipped);
+        return;
+    }
+    if (!gpu_frame_valid(f)) {
+        warn_report_once("vmware-svga: GPU frame skipped: IOSurface %zux%zu "
+                         "format 0x%x for a %ux%u frame",
+                         IOSurfaceGetWidth(f->surface),
+                         IOSurfaceGetHeight(f->surface),
+                         (unsigned)IOSurfaceGetPixelFormat(f->surface),
+                         f->msg.width, f->msg.height);
+        gpu_frame_release(f, VIMSurfaceSkipped);
+        return;
+    }
+    if (!(f->texture = vmsvga_metal_texture_create(f->surface))) {
+        warn_report_once("vmware-svga: GPU frame skipped: no Metal texture "
+                         "for its IOSurface");
         gpu_frame_release(f, VIMSurfaceSkipped);
         return;
     }
