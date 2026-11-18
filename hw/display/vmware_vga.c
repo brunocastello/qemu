@@ -94,10 +94,15 @@ struct vmsvga_state_s {
     Notifier legacy_ram_ready;
 #ifdef VMSVGA_GPU_DISPLAY
     /* The executor's frames are the console scanout (vmware_vga_gpu.c);
-     * guest software updates are held back while one is, unless
-     * VIM_DISPLAY_LATEST_WINS=1 lets them take the console back. */
+     * guest software updates are held back while one is (VirtualIntelMac's
+     * app drops them while a surface is active), unless no GPU frame was
+     * presented for gpu_software_after_ms (0: never), or the latest-wins
+     * policy (VIM_DISPLAY_LATEST_WINS=1 or gpu-latest-wins=on) is set.
+     * A captured fullscreen GL context publishes through VRAM and UPDATE,
+     * not GPU frames, so without the idle rule it stays black. */
     VMSVGAGpuDisplay *gpu_display;
     bool gpu_latest_wins;
+    uint32_t gpu_software_after_ms;
 #endif
 #endif
 
@@ -586,8 +591,21 @@ static void vmsvga_gfx_update(struct vmsvga_state_s *s,
 {
 #ifdef VMSVGA_GPU_DISPLAY
     if (vmsvga_gpu_display_active(s->gpu_display)) {
-        if (!s->gpu_latest_wins) {
+        if (!s->gpu_latest_wins &&
+            (!s->gpu_software_after_ms ||
+             vmsvga_gpu_display_idle_ms(s->gpu_display) <
+                 s->gpu_software_after_ms)) {
             return;
+        }
+        if (!s->gpu_latest_wins) {
+            static bool logged;
+
+            if (!logged) {
+                logged = true;
+                info_report("vmware-svga: software updates take the display "
+                            "back after %u ms without GPU frames",
+                            s->gpu_software_after_ms);
+            }
         }
         vmsvga_gpu_to_software(s);
         return; /* the switch already published the full surface */
@@ -1616,6 +1634,14 @@ static inline bool vmsvga_check_size(struct vmsvga_state_s *s)
                                                      format, stride,
                                                      s->vga.vram_ptr);
         }
+#ifdef VMSVGA_GPU_DISPLAY
+        /* GPU frames were sized for the old mode: the new mode starts on the
+         * software surface, and the next GPU frame takes the console back
+         * (its cleanup callback releases the current frame). */
+        if (vmsvga_gpu_display_active(s->gpu_display)) {
+            dpy_gl_scanout_disable(s->vga.con);
+        }
+#endif
         dpy_gfx_replace_surface(s->vga.con, surface);
         s->scanout_pitch = stride;
         s->invalidated = 1;
@@ -1946,7 +1972,7 @@ static void vmsvga_init(DeviceState *dev, struct vmsvga_state_s *s,
     if (gpu_display && (s->gpu_display = vmsvga_gpu_display_new(s->vga.con))) {
         char address[32];
 
-        s->gpu_latest_wins =
+        s->gpu_latest_wins = s->gpu_latest_wins ||
             g_strcmp0(getenv("VIM_DISPLAY_LATEST_WINS"), "1") == 0;
         snprintf(address, sizeof(address), "%p",
                  (void *)vmsvga_gpu_display_port);
@@ -2134,6 +2160,15 @@ static const Property vga_vmware_properties[] = {
                        chip.vga.vram_size_mb, 16),
     DEFINE_PROP_BOOL("global-vmstate", struct pci_vmsvga_state_s,
                      chip.vga.global_vmstate, false),
+#ifdef VMSVGA_GPU_DISPLAY
+    /* Software updates show again after this long without GPU frames
+     * (captured fullscreen GL, login); 0 keeps VirtualIntelMac's latch. */
+    DEFINE_PROP_UINT32("gpu-software-after-ms", struct pci_vmsvga_state_s,
+                       chip.gpu_software_after_ms, 250),
+    /* The newest update wins, software or GPU (VIM_DISPLAY_LATEST_WINS=1). */
+    DEFINE_PROP_BOOL("gpu-latest-wins", struct pci_vmsvga_state_s,
+                     chip.gpu_latest_wins, false),
+#endif
 };
 
 static void vmsvga_class_init(ObjectClass *klass, void *data)

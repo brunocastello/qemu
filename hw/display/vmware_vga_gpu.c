@@ -33,6 +33,7 @@
 #include "qemu/error-report.h"
 #include "qemu/main-loop.h"
 #include "qemu/thread.h"
+#include "qemu/timer.h"
 #include "vim-display-surface-message.h"
 #include "vmware_vga_gpu.h"
 
@@ -55,6 +56,7 @@ struct VMSVGAGpuDisplay {
     /* main loop (BQL) only */
     QEMUBH *bh;
     GpuFrame *current; /* the console's scanout texture */
+    int64_t last_present_ms; /* QEMU_CLOCK_REALTIME, 0 before the first */
     bool first_frame_logged;
 };
 
@@ -210,6 +212,7 @@ static void gpu_present_bh(void *opaque)
         info_report("vmware-svga: first GPU frame presented (%ux%u)", w, h);
     }
     dpy_gl_update(g->con, 0, 0, w, h);
+    g->last_present_ms = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
 }
 
 VMSVGAGpuDisplay *vmsvga_gpu_display_new(QemuConsole *con)
@@ -274,6 +277,14 @@ void vmsvga_gpu_display_free(VMSVGAGpuDisplay *g)
 bool vmsvga_gpu_display_active(VMSVGAGpuDisplay *g)
 {
     return g && g->current;
+}
+
+int64_t vmsvga_gpu_display_idle_ms(VMSVGAGpuDisplay *g)
+{
+    if (!g || !g->last_present_ms) {
+        return INT64_MAX;
+    }
+    return qemu_clock_get_ms(QEMU_CLOCK_REALTIME) - g->last_present_ms;
 }
 
 void vmsvga_gpu_display_gl_block(VMSVGAGpuDisplay *g, bool block)

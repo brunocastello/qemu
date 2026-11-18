@@ -19,6 +19,8 @@ VMSVGAGpuDisplay *vmsvga_gpu_display_new(QemuConsole *con);
 void vmsvga_gpu_display_free(VMSVGAGpuDisplay *g);
 /* A GPU frame is the console's current scanout. */
 bool vmsvga_gpu_display_active(VMSVGAGpuDisplay *g);
+/* Milliseconds since a GPU frame was last presented (INT64_MAX if never). */
+int64_t vmsvga_gpu_display_idle_ms(VMSVGAGpuDisplay *g);
 /* GraphicHwOps.gl_block: present a held frame once the listeners are idle. */
 void vmsvga_gpu_display_gl_block(VMSVGAGpuDisplay *g, bool block);
 /*
