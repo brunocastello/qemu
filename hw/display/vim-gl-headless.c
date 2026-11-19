@@ -10,7 +10,7 @@
 #include "hw/pci/pci_device.h"
 #include "migration/vmstate.h"
 #include "qom/object.h"
-#include "system/address-spaces.h"
+#include "exec/address-spaces.h"
 #include "hw/display/vim-passthrough-opengl-inprocess.h"
 /* The private app fork is built in this repository with its guest sources. */
 #include "vim_gl_headless.h"
@@ -352,7 +352,7 @@ static const VMStateDescription vim_gl_headless_vmstate = {
     .name = TYPE_VIM_GL_HEADLESS,
     .unmigratable = 1,
 };
-static void vim_gl_headless_class_init(ObjectClass *klass, const void *data)
+static void vim_gl_headless_class_init(ObjectClass *klass, void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     PCIDeviceClass *pc = PCI_DEVICE_CLASS(klass);
