@@ -885,7 +885,7 @@ elif host_os == 'darwin'
   iokit = dependency('appleframeworks', modules: 'IOKit', required: false)
   iosurface = dependency('appleframeworks', modules: 'IOSurface', required: false)
   host_dsosuf = '.dylib'
-  pvg = dependency('appleframeworks', modules: ['ParavirtualizedGraphics', 'Metal'],
+  pvg = dependency('appleframeworks', modules: ['ParavirtualizedGraphics', 'Metal', 'Foundation', 'CoreGraphics'],
                    required: get_option('pvg'))
   metal = dependency('appleframeworks', modules: 'Metal', required: false)
   quartzcore = dependency('appleframeworks', modules: ['OpenGL', 'QuartzCore'], required: false)
