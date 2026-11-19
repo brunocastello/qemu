@@ -50,17 +50,26 @@ jobs:
             --disable-docs --disable-sdl --disable-werror -Doptimization=2 --enable-spice --disable-dbus-display --disable-opengl \
             -Dhvdbt_engine="$GITHUB_WORKSPACE/vim/Source/HybridHypervisor"
           if [ "${{ inputs.all_targets }}" = true ]; then ninja -k 0; else ninja qemu-system-x86_64 qemu-system-ppc qemu-img; fi
+      - name: PVG out-of-process helper (x86_64; VirtualIntelMac scripts/build-pvg-oop-helper)
+        run: |
+          xcrun clang -arch x86_64 -mmacosx-version-min=11.0 -O2 -Wall -Wextra \
+            -I hw/display -I hw/display/compat \
+            -framework Foundation -framework Metal -framework CoreGraphics \
+            hw/display/apple-gfx-helper.m hw/display/apple-gfx-legacy-shadow.m \
+            hw/display/compat/PVGHostAIRRepair.m -o apple-gfx-helper
+          lipo -archs apple-gfx-helper
       - name: Bundle
         run: |
           mkdir -p dist/lib
           cp build/qemu-system-x86_64 build/qemu-system-ppc build/qemu-img dist/
+          cp apple-gfx-helper dist/
           cp hostlib/libVIMPassthroughOpenGLHost.dylib dist/
           dylibbundler -of -b -x dist/qemu-system-x86_64 -x dist/qemu-system-ppc -x dist/qemu-img -d dist/lib -p @executable_path/lib/
           for f in dist/qemu-system-x86_64 dist/qemu-system-ppc dist/qemu-img dist/lib/*.dylib; do
             while [ "$(otool -l "$f" | grep -c 'path @executable_path/lib/')" -gt 1 ]; do
               install_name_tool -delete_rpath @executable_path/lib/ "$f"; done; done
           cp -R pc-bios dist/pc-bios
-          for f in dist/qemu-system-x86_64 dist/qemu-system-ppc dist/qemu-img dist/libVIMPassthroughOpenGLHost.dylib dist/lib/*.dylib; do codesign -f -s - "$f"; done
+          for f in dist/qemu-system-x86_64 dist/qemu-system-ppc dist/qemu-img dist/apple-gfx-helper dist/libVIMPassthroughOpenGLHost.dylib dist/lib/*.dylib; do codesign -f -s - "$f"; done
           # Hybrid Hypervisor runs the guest in a Hypervisor.framework VM
           codesign -f -s - --entitlements accel/hvf/entitlements.plist dist/qemu-system-x86_64
           codesign -d --entitlements - dist/qemu-system-x86_64 | grep -q com.apple.security.hypervisor

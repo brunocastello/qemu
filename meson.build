@@ -3445,7 +3445,9 @@ foreach target : target_dirs
 
     # PVG is not cross-architecture.  Use accelerator_targets as a proxy to
     # figure out which target can support PVG on this host
-    if pvg.found() and target in accelerator_targets.get('CONFIG_HVF', [])
+    # VirtualIntelMac: x86_64 guests on an Apple silicon host reach the Intel
+    # PVG protocol through an out-of-process x86_64 helper (apple-gfx-helper).
+    if pvg.found() and (target == 'x86_64-softmmu' or target in accelerator_targets.get('CONFIG_HVF', []))
       target_kconfig += 'CONFIG_MAC_PVG=y'
     endif
 
