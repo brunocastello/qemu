@@ -1,7 +1,7 @@
 /* Local experimental PVG helper RAM export. SPDX-License-Identifier: GPL-2.0-or-later */
 #ifndef APPLE_GFX_OOP_RAM_H
 #define APPLE_GFX_OOP_RAM_H
-#include "system/ramblock.h"
+#include "exec/ramblock.h" /* QEMU 10 */
 #include "apple-gfx-oop-wire.h"
 #include <spawn.h>
 #include <sys/socket.h>
@@ -81,6 +81,31 @@ static GArray *apple_gfx_oop_ram_ranges(Error **errp)
     return c.ranges;
 }
 
+/*
+ * UTM: QEMU runs in the app sandbox, where POSIX shared memory names must
+ * carry the app-group prefix, which qemu_shm_alloc() does not use. An
+ * unlinked temporary file in the sandbox's own temporary directory gives the
+ * helper the same kind of shared descriptor.
+ */
+static int apple_gfx_oop_frame_fd(size_t size, Error **errp)
+{
+    g_autofree char *path = g_build_filename(g_get_tmp_dir(),
+                                             "qemu-pvg-frame-XXXXXX", NULL);
+    int fd = g_mkstemp_full(path, O_RDWR | O_CLOEXEC, 0600);
+
+    if (fd < 0) {
+        error_setg_errno(errp, errno, "PVG shared frame file");
+        return -1;
+    }
+    unlink(path);
+    if (ftruncate(fd, size)) {
+        error_setg_errno(errp, errno, "PVG shared frame file size");
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
 /* Bounded bootstrap check only; not the eventual device I/O wait path. */
 static bool apple_gfx_oop_bootstrap(GArray *ranges, const char *helper,
                                    const char *donor, int *live_fd,
@@ -101,7 +126,7 @@ static bool apple_gfx_oop_bootstrap(GArray *ranges, const char *helper,
     setsockopt(sockets[0], SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
     posix_spawnattr_t attr;
     posix_spawn_file_actions_t actions;
-    int frame_fd = qemu_shm_alloc(APPLE_GFX_OOP_FRAME_SIZE, errp);
+    int frame_fd = apple_gfx_oop_frame_fd(APPLE_GFX_OOP_FRAME_SIZE, errp);
     if (frame_fd < 0) {
         close(sockets[0]); close(sockets[1]);
         return false;
