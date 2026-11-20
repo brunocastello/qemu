@@ -975,6 +975,36 @@ int qemu_shm_alloc(size_t size, Error **errp)
     g_string_printf(shm_name, "/qemu-" FMT_pid "-shm-%d", getpid(),
                     cur_sequence);
 
+#ifdef __APPLE__
+    /*
+     * The App Sandbox allows POSIX shared memory only under the app group:
+     * "<group-id>/name". macOS names are at most 31 characters (PSHMNAMLEN),
+     * so the suffix is short and random; the name is unlinked right after
+     * creation, and a clash is retried.
+     */
+    const char *group = g_getenv("QEMU_SHM_APP_GROUP");
+    if (group && *group) {
+        static const char chars[] = "abcdefghijklmnopqrstuvwxyz0123456789";
+        size_t room = 31 - strlen(group) - 1;
+        if (strlen(group) + 2 > 31) {
+            error_setg(errp, "app group '%s' leaves no room for a shared "
+                       "memory name (31 characters at most)", group);
+            return -1;
+        }
+        room = MIN(room, 8);
+        for (int attempt = 0; attempt < 100; attempt++) {
+            g_string_printf(shm_name, "%s/", group);
+            for (size_t i = 0; i < room; i++) {
+                g_string_append_c(shm_name,
+                                  chars[g_random_int_range(0, sizeof(chars) - 1)]);
+            }
+            fd = shm_open(shm_name->str, oflag, mode);
+            if (fd >= 0 || errno != EEXIST) {
+                break;
+            }
+        }
+    } else
+#endif
     fd = shm_open(shm_name->str, oflag, mode);
     if (fd < 0) {
         error_setg_errno(errp, errno,
