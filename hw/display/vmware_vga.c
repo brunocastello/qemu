@@ -1458,6 +1458,21 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value)
         break;
 
     case SVGA_REG_ENABLE:
+        if (s->passthrough_opengl_bridge && s->enable && !value) {
+            /* Guest leaves SVGA (shutdown, restart): blank the old scanout
+             * like a real display. Otherwise the last frame left in VRAM (a
+             * fullscreen game's) shows in VGA mode, gets into the frontend's
+             * VM screenshot and reappears at the next start. */
+#ifdef VMSVGA_GPU_DISPLAY
+            vmsvga_gpu_to_software(s);
+#endif
+            uint64_t bytes = MIN((uint64_t)vmsvga_framebuffer_pitch(s) *
+                                 MAX(s->new_height, 0), s->vga.vram_size);
+            if (bytes) {
+                memset(s->vga.vram_ptr, 0, bytes);
+                memory_region_set_dirty(&s->vga.vram, 0, bytes);
+            }
+        }
         s->enable = !!value;
         s->invalidated = 1;
         s->vga.hw_ops->invalidate(&s->vga);
