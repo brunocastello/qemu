@@ -80,6 +80,8 @@ struct vmsvga_state_s {
     bool legacy_panel_hidpi;
     bool legacy_panel_irq_enabled;
     bool legacy_panel_large_scanout;
+    /* UTM: the host UI sent a window size (dynamic resolution); kept over guest resets */
+    bool ui_info_seen;
     PCIDevice *legacy_panel_pci;
     uint32_t passthrough_opengl_next;
     uint64_t passthrough_opengl_epoch;
@@ -334,6 +336,7 @@ static unsigned vmsvga_max_height(const struct vmsvga_state_s *s)
 }
 
 static void vmsvga_ui_info(void *opaque, uint32_t head, QemuUIInfo *info);
+static void vmsvga_panel_from_ui_info(struct vmsvga_state_s *s, QemuUIInfo *info);
 static void vmsvga_request_panel(struct vmsvga_state_s *s, uint32_t width,
                                  uint32_t height, uint32_t scale);
 
@@ -1432,11 +1435,16 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value)
         if (s->passthrough_opengl_bridge && s->vga.vram_size > SVGA_VIM_LARGE_SCANOUT_BYTES &&
             value == VIM_PANEL_LARGE_SCANOUT_MAGIC && !s->legacy_panel_large_scanout) {
             s->legacy_panel_large_scanout = true;
-            /* The app may have sent its size before the driver attached. */
+            /*
+             * The app may have sent its size before the driver attached. A
+             * window size (dynamic resolution) wins: in full screen it is the
+             * usable screen area; otherwise grow to the host display size the
+             * boot panel could not hold.
+             */
             QemuUIInfo info = *dpy_get_ui_info(s->vga.con);
-            vmsvga_ui_info(s, 0, &info);
-            /* Grow to the host display size the boot panel could not hold. */
-            if (s->host_panel_width) {
+            if (s->ui_info_seen && info.width >= 800 && info.height >= 600) {
+                vmsvga_panel_from_ui_info(s, &info);
+            } else if (s->host_panel_width) {
                 vmsvga_request_panel(s, s->host_panel_width, s->host_panel_height,
                                      s->host_panel_scale);
             }
@@ -1864,11 +1872,18 @@ static void vmsvga_request_panel(struct vmsvga_state_s *s, uint32_t width,
 static void vmsvga_ui_info(void *opaque, uint32_t head, QemuUIInfo *info)
 {
     struct vmsvga_state_s *s = opaque;
-    uint32_t width = info->width, height = info->height, scale = 1;
 
     if (head) {
         return;
     }
+    s->ui_info_seen = true;
+    vmsvga_panel_from_ui_info(s, info);
+}
+
+static void vmsvga_panel_from_ui_info(struct vmsvga_state_s *s, QemuUIInfo *info)
+{
+    uint32_t width = info->width, height = info->height, scale = 1;
+
     /* VirtualIntelMac's app sends the window's backing scale (logical_scale);
      * QEMU 10.0's QemuUIInfo has none. A HiDPI panel (ui-scale 2, hidpi on)
      * means a Retina host window sending backing pixels: keep 2x, as VIM does,
