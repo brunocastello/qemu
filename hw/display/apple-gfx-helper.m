@@ -254,8 +254,13 @@ static int helper_main(int argc, char **argv)
         CGSize host_mm = CGDisplayScreenSize(host_display);
         size_t host_pixels = host_mode ? CGDisplayModeGetPixelWidth(host_mode) : 0;
         size_t host_points = host_mode ? CGDisplayModeGetWidth(host_mode) : 0;
-        if (host_points && host_pixels > host_points) {
-            frame_width = 2560; frame_height = 1600;
+        /* Start at the host's current resolution (its backing pixels, so a
+         * Retina host gives a HiDPI guest with the same "looks like" size). */
+        size_t host_pixel_height = host_mode ? CGDisplayModeGetPixelHeight(host_mode) : 0;
+        if (host_points && host_pixels >= 640 && host_pixel_height >= 400 &&
+            host_pixels <= APPLE_GFX_OOP_MAX_DIMENSION &&
+            host_pixel_height <= APPLE_GFX_OOP_MAX_DIMENSION) {
+            frame_width = (uint32_t)host_pixels; frame_height = (uint32_t)host_pixel_height;
         }
         if (host_pixels && host_mm.width > 0) {
             double mm_per_pixel = host_mm.width / host_pixels;
@@ -438,10 +443,32 @@ static int helper_main(int argc, char **argv)
             [command commit];
         };
         display = [device newDisplayWithDescriptor:display_desc port:0 serialNum:1];
+        /* The host's resolution first (the guest's default), then common
+         * Mac sizes that fit in it, so the guest can pick another one in
+         * System Preferences > Displays. */
+        static const uint32_t extra_modes[][2] = {
+            {3840, 2400}, {3456, 2234}, {3024, 1964}, {2880, 1800}, {2560, 1600},
+            {2560, 1440}, {1920, 1200}, {1920, 1080}, {1680, 1050}, {1440, 900},
+            {1280, 800}, {1024, 768},
+        };
+        NSMutableArray<PGDisplayMode *> *modes = [NSMutableArray array];
         PGDisplayCoord_t resolution = {frame_width, frame_height};
         PGDisplayMode *mode = [[NSClassFromString(@"PGDisplayMode") alloc]
             initWithSizeInPixels:resolution refreshRateInHz:60];
-        display.modeList = @[mode];
+        [modes addObject:mode];
+        [mode release];
+        for (size_t i = 0; i < sizeof(extra_modes) / sizeof(extra_modes[0]); i++) {
+            if (extra_modes[i][0] > frame_width || extra_modes[i][1] > frame_height ||
+                (extra_modes[i][0] == frame_width && extra_modes[i][1] == frame_height)) {
+                continue;
+            }
+            PGDisplayCoord_t size = {extra_modes[i][0], extra_modes[i][1]};
+            mode = [[NSClassFromString(@"PGDisplayMode") alloc]
+                initWithSizeInPixels:size refreshRateInHz:60];
+            [modes addObject:mode];
+            [mode release];
+        }
+        display.modeList = modes;
         AppleGFXOOPReady ready = {APPLE_GFX_OOP_MAGIC, device ? 0 : 1, desc.mmioLength};
         if (!apple_gfx_oop_io(channel, &ready, sizeof(ready), true)) { return 7; }
         if (!device) { return 8; }
