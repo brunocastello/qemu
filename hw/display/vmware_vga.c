@@ -74,6 +74,10 @@ struct vmsvga_state_s {
     uint32_t legacy_panel_generation, legacy_panel_ack;
     uint32_t legacy_panel_request_width, legacy_panel_request_height;
     uint32_t legacy_panel_request_scale;
+    /* Host display size, requested once the driver opts into large scanout
+     * (the boot panel is bounded to the 16 MiB driver reserve). */
+    uint32_t host_panel_width, host_panel_height, host_panel_scale;
+    bool legacy_panel_hidpi;
     bool legacy_panel_irq_enabled;
     bool legacy_panel_large_scanout;
     PCIDevice *legacy_panel_pci;
@@ -330,6 +334,8 @@ static unsigned vmsvga_max_height(const struct vmsvga_state_s *s)
 }
 
 static void vmsvga_ui_info(void *opaque, uint32_t head, QemuUIInfo *info);
+static void vmsvga_request_panel(struct vmsvga_state_s *s, uint32_t width,
+                                 uint32_t height, uint32_t scale);
 
 #ifdef VERBOSE
 # define GUEST_OS_BASE          0x5001
@@ -1429,6 +1435,11 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value)
             /* The app may have sent its size before the driver attached. */
             QemuUIInfo info = *dpy_get_ui_info(s->vga.con);
             vmsvga_ui_info(s, 0, &info);
+            /* Grow to the host display size the boot panel could not hold. */
+            if (s->host_panel_width) {
+                vmsvga_request_panel(s, s->host_panel_width, s->host_panel_height,
+                                     s->host_panel_scale);
+            }
         }
         break;
     case VIM_PANEL_ACK_REGISTER:
@@ -1811,15 +1822,12 @@ static const VMStateDescription vmstate_vmware_vga = {
     }
 };
 
-static void vmsvga_ui_info(void *opaque, uint32_t head, QemuUIInfo *info)
+static void vmsvga_request_panel(struct vmsvga_state_s *s, uint32_t width,
+                                 uint32_t height, uint32_t scale)
 {
-    struct vmsvga_state_s *s = opaque;
-    uint32_t width = info->width, height = info->height;
-    uint32_t scale = 1; /* QEMU 10.0's QemuUIInfo has no logical_scale */
-
     /* Local research only. Immutable native-panel metadata remains separate
      * from the coalesced requested mode. No frame-time guest polling. */
-    if (!s->passthrough_opengl_bridge || head || width < 800 || height < 600 ||
+    if (!s->passthrough_opengl_bridge || width < 800 || height < 600 ||
         width > vmsvga_max_width(s) || height > vmsvga_max_height(s) ||
         (width == s->legacy_panel_request_width &&
          height == s->legacy_panel_request_height &&
@@ -1835,6 +1843,14 @@ static void vmsvga_ui_info(void *opaque, uint32_t head, QemuUIInfo *info)
     }
     if (s->legacy_panel_irq_enabled) {
         vmsvga_legacy_irq_update(s);
+    }
+}
+
+static void vmsvga_ui_info(void *opaque, uint32_t head, QemuUIInfo *info)
+{
+    /* QEMU 10.0's QemuUIInfo has no logical_scale */
+    if (!head) {
+        vmsvga_request_panel(opaque, info->width, info->height, 1);
     }
 }
 
@@ -2086,6 +2102,33 @@ static void pci_vmsvga_realize(PCIDevice *dev, Error **errp)
 {
     struct pci_vmsvga_state_s *s = VMWARE_SVGA(dev);
 
+    /* Guests without HiDPI (Snow Leopard): the same space at scale 1. */
+    if (!s->chip.legacy_panel_hidpi && s->chip.legacy_panel_scale == 2) {
+        s->chip.legacy_panel_width /= 2;
+        s->chip.legacy_panel_height /= 2;
+        s->chip.legacy_panel_scale = 1;
+    }
+    if (!s->chip.legacy_panel_hidpi && s->chip.host_panel_scale == 2) {
+        s->chip.host_panel_width /= 2;
+        s->chip.host_panel_height /= 2;
+        s->chip.host_panel_scale = 1;
+    }
+    if (s->chip.host_panel_width && s->chip.host_panel_scale == 1 &&
+        s->chip.legacy_panel_scale == 1 &&
+        s->chip.host_panel_width <= 2560 && s->chip.host_panel_height <= 1600) {
+        /* It fits the boot panel: no later switch. */
+        s->chip.legacy_panel_width = s->chip.host_panel_width;
+        s->chip.legacy_panel_height = s->chip.host_panel_height;
+        s->chip.host_panel_width = s->chip.host_panel_height = 0;
+    }
+    if (s->chip.host_panel_width &&
+        ((s->chip.host_panel_scale != 1 && s->chip.host_panel_scale != 2) ||
+         s->chip.host_panel_width > SVGA_VIM_LARGE_DIMENSION ||
+         s->chip.host_panel_height > SVGA_VIM_LARGE_DIMENSION)) {
+        error_setg(errp, "Host panel geometry exceeds the large scanout bounds");
+        return;
+    }
+
     if (s->chip.passthrough_opengl_bridge &&
         ((s->chip.legacy_panel_scale != 1 && s->chip.legacy_panel_scale != 2) ||
          s->chip.legacy_panel_width < 640 || s->chip.legacy_panel_width > 2560 ||
@@ -2156,6 +2199,16 @@ static const Property vga_vmware_properties[] = {
                        chip.legacy_panel_height, 800),
     DEFINE_PROP_UINT32("passthrough-opengl-ui-scale", struct pci_vmsvga_state_s,
                        chip.legacy_panel_scale, 1),
+    /* Host display size (pixels): the driver switches to it once it opts into
+     * large scanout. hidpi=off halves scale-2 sizes for guests without HiDPI. */
+    DEFINE_PROP_UINT32("passthrough-opengl-host-width", struct pci_vmsvga_state_s,
+                       chip.host_panel_width, 0),
+    DEFINE_PROP_UINT32("passthrough-opengl-host-height", struct pci_vmsvga_state_s,
+                       chip.host_panel_height, 0),
+    DEFINE_PROP_UINT32("passthrough-opengl-host-scale", struct pci_vmsvga_state_s,
+                       chip.host_panel_scale, 1),
+    DEFINE_PROP_BOOL("passthrough-opengl-hidpi", struct pci_vmsvga_state_s,
+                     chip.legacy_panel_hidpi, true),
     DEFINE_PROP_UINT32("vgamem_mb", struct pci_vmsvga_state_s,
                        chip.vga.vram_size_mb, 16),
     DEFINE_PROP_BOOL("global-vmstate", struct pci_vmsvga_state_s,
