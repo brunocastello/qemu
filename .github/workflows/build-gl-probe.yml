@@ -1,0 +1,19 @@
+name: Build Intel guest GL probes (x86_64, macOS 10.14 target)
+on:
+  push:
+    branches: [gl-probe]
+jobs:
+  build:
+    runs-on: xcode-27
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 1, sparse-checkout: contrib/vim-probes }
+      - name: Build
+        run: |
+          mkdir -p out
+          for f in contrib/vim-probes/*.c; do
+            clang -O1 -arch x86_64 -mmacosx-version-min=10.14 -Wno-deprecated-declarations "$f" -framework OpenGL -o "out/$(basename "$f" .c)"
+          done
+          file out/*
+      - uses: actions/upload-artifact@v4
+        with: { name: gl-probes, path: out }
