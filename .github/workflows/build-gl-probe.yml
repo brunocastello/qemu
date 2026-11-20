@@ -1,19 +1,62 @@
-name: Build Intel guest GL probes (x86_64, macOS 10.14 target)
+name: Build Intel guest GL probes + patched Mojave GL pair (x86_64)
 on:
   push:
     branches: [gl-probe]
+env:
+  VIM_REPO: https://github.com/nfzerox/VirtualIntelMacOnAppleSilicon.git
+  VIM_COMMIT: 2861da9e265e557aef90319e4451487ed1fed553
 jobs:
   build:
     runs-on: xcode-27
     steps:
       - uses: actions/checkout@v4
-        with: { fetch-depth: 1, sparse-checkout: contrib/vim-probes }
-      - name: Build
+        with: { fetch-depth: 1 }
+      - name: Probes
         run: |
-          mkdir -p out
+          mkdir -p out/probes
           for f in contrib/vim-probes/*.c; do
-            clang -O1 -arch x86_64 -mmacosx-version-min=10.14 -Wno-deprecated-declarations "$f" -framework OpenGL -o "out/$(basename "$f" .c)"
+            clang -O1 -arch x86_64 -mmacosx-version-min=10.14 -Wno-deprecated-declarations "$f" -framework OpenGL -o "out/probes/$(basename "$f" .c)"
           done
-          file out/*
+      - name: VirtualIntelMac sources + packed-vertex patch
+        run: |
+          git init -q vim && cd vim
+          git remote add origin "$VIM_REPO"
+          git sparse-checkout set Source/PassthroughOpenGL Source/scripts Source/prebuilt/PassthroughOpenGL Source/vendor/qemu/include/hw/display \
+            Source/vendor/qemu/hw/display Source/vendor/source/VMsvga2 Source/probes Source/tools
+          git fetch -q --depth 1 --filter=blob:none origin "$VIM_COMMIT" && git checkout -q FETCH_HEAD
+          patch -p1 < "$GITHUB_WORKSPACE/hw/display/vim-packed-vertex.patch"
+      - name: macOS 10.9 SDK (period headers for the guest GL pair)
+        run: |
+          curl -sfL -o sdk.tar.xz https://github.com/phracker/MacOSX-SDKs/releases/download/11.3/MacOSX10.9.sdk.tar.xz
+          tar xf sdk.tar.xz && ls -d MacOSX10.9.sdk
+      - name: Mojave guest GL pair, x86_64 slice (VIM build-opengl-guest-gl-pair steps)
+        run: |
+          set -x
+          root=vim/Source; sdk=$PWD/MacOSX10.9.sdk; b=$PWD/pair; mkdir -p "$b"
+          python3 $root/scripts/generate-passthrough-opengl.py "$sdk" "$b"
+          python3 $root/scripts/generate-opengl-gli.py "$b/passthrough-opengl-gli-map.json" "$b/passthrough-opengl-gli-generated.inc" --runtime-dispatch-count 975
+          grep -Fx '#define VIM_GLI_DISPATCH_COUNT 975' "$b/passthrough-opengl-gli-generated.inc"
+          ls "$b/PeriodABI/OpenGL/gliDispatch.h"
+          flags=(-O2 -g -fno-omit-frame-pointer -Wall -Wextra -Wno-deprecated-declarations -Wno-unused-function -Wno-missing-braces
+            -Wno-missing-field-initializers -arch x86_64 -isysroot "$sdk" -mmacosx-version-min=10.14 -I "$b" -I "$b/PeriodABI")
+          clang "${flags[@]}" -dynamiclib $root/PassthroughOpenGL/passthrough-opengl-client.c \
+            -Wl,-install_name,@rpath/libVIMPassthroughOpenGL.dylib -framework IOKit -framework CoreFoundation -o "$b/libVIMPassthroughOpenGL.dylib"
+          clang "${flags[@]}" -DVIM_PASSTHROUGH_OPENGL_BACKEND=1 -dynamiclib -fvisibility=hidden $root/PassthroughOpenGL/passthrough-opengl-gli.c \
+            "$b/libVIMPassthroughOpenGL.dylib" -Wl,-install_name,@rpath/libVIMGLI.dylib -Wl,-exported_symbols_list,$root/PassthroughOpenGL/gli.exports \
+            -Wl,-rpath,@loader_path -framework CoreFoundation -framework CoreGraphics -framework IOKit -framework IOSurface -o "$b/GLEngine"
+          install_name_tool -change @rpath/libVIMPassthroughOpenGL.dylib @loader_path/libVIMPassthroughOpenGL.dylib "$b/GLEngine"
+          mkdir -p out/mojave-gl
+          for f in GLEngine libVIMPassthroughOpenGL.dylib; do
+            lipo $root/prebuilt/PassthroughOpenGL/mojave/GuestTools/$f -replace x86_64 "$b/$f" -output out/mojave-gl/$f
+            codesign --force --sign - --digest-algorithm=sha1,sha256 out/mojave-gl/$f
+            lipo -info out/mojave-gl/$f
+          done
+      - name: Host executor with the same patch
+        run: |
+          cd vim
+          cp "$GITHUB_WORKSPACE/hw/display/vim-vram-memory.h" Source/vendor/qemu/hw/display/vim-vram-memory.h
+          patch -p1 < "$GITHUB_WORKSPACE/hw/display/vim-display-inprocess.patch"
+          python3 Source/scripts/build-opengl-host.py --output "$GITHUB_WORKSPACE/out/host"
+          codesign -f -s - "$GITHUB_WORKSPACE/out/host/libVIMPassthroughOpenGLHost.dylib"
       - uses: actions/upload-artifact@v4
         with: { name: gl-probes, path: out }
