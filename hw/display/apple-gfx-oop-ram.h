@@ -83,12 +83,17 @@ static GArray *apple_gfx_oop_ram_ranges(Error **errp)
 
 /*
  * UTM: QEMU runs in the app sandbox, where POSIX shared memory names must
- * carry the app-group prefix, which qemu_shm_alloc() does not use. An
- * unlinked temporary file in the sandbox's own temporary directory gives the
- * helper the same kind of shared descriptor.
+ * carry the app-group prefix. A signed UTM passes that group in
+ * QEMU_SHM_APP_GROUP and qemu_shm_alloc() names the object under it, so the
+ * frame stays in memory like the guest RAM. Without an app group (ad-hoc
+ * builds), an unlinked temporary file in the sandbox's own temporary
+ * directory gives the helper the same kind of shared descriptor.
  */
 static int apple_gfx_oop_frame_fd(size_t size, Error **errp)
 {
+    if (getenv("QEMU_SHM_APP_GROUP")) {
+        return qemu_shm_alloc(size, errp);
+    }
     g_autofree char *path = g_build_filename(g_get_tmp_dir(),
                                              "qemu-pvg-frame-XXXXXX", NULL);
     int fd = g_mkstemp_full(path, O_RDWR | O_CLOEXEC, 0600);
