@@ -1848,10 +1848,22 @@ static void vmsvga_request_panel(struct vmsvga_state_s *s, uint32_t width,
 
 static void vmsvga_ui_info(void *opaque, uint32_t head, QemuUIInfo *info)
 {
-    /* QEMU 10.0's QemuUIInfo has no logical_scale */
-    if (!head) {
-        vmsvga_request_panel(opaque, info->width, info->height, 1);
+    struct vmsvga_state_s *s = opaque;
+    uint32_t width = info->width, height = info->height, scale = 1;
+
+    if (head) {
+        return;
     }
+    /* VirtualIntelMac's app sends the window's backing scale (logical_scale);
+     * QEMU 10.0's QemuUIInfo has none. A HiDPI panel (ui-scale 2, hidpi on)
+     * means a Retina host window sending backing pixels: keep 2x, as VIM does,
+     * so the guest display agent selects the 2x mode. Even sizes only. */
+    if (s->legacy_panel_scale == 2 || s->host_panel_scale == 2) {
+        width &= ~1u;
+        height &= ~1u;
+        scale = 2;
+    }
+    vmsvga_request_panel(s, width, height, scale);
 }
 
 /* QEMU 10.0: gfx_update returns void (11.1: bool). */
