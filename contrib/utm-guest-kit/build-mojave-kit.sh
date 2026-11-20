@@ -54,6 +54,8 @@ git -C "$WORK/vim" checkout -q "$VIM_COMMIT" -- \
   Source/scripts Source/prebuilt/mojave Source/prebuilt/guest-payload.tar.xz \
   Source/prebuilt/iosurface Source/prebuilt/catalina-gl Source/prebuilt/audio Source/prebuilt/bigsur \
   Source/prebuilt/PassthroughOpenGL/mojave Source/prebuilt/tools Source/PassthroughOpenGL \
+  Source/vendor/source/VMsvga2 Source/vendor/qemu/include/hw/display Source/vendor/qemu/hw/display/vim-vram-memory.h \
+  Source/probes/opengl-packet-journal.inc \
   Source/vendor/apple-silicon-host-inputs.tar.gz Source/vendor/apple-silicon-SHA256SUMS \
   Source/VirtualIntelMac/Assets.xcassets/mojaveIcon.imageset/art.png LICENSE
 SRC="$WORK/vim/Source"
