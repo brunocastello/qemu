@@ -292,6 +292,15 @@ static int helper_main(int argc, char **argv)
             host_pixel_height <= APPLE_GFX_OOP_MAX_DIMENSION) {
             frame_width = (uint32_t)host_pixels; frame_height = (uint32_t)host_pixel_height;
         }
+        /* UTM passes the size a full-screen window can show (below a notch): the
+         * whole panel would give the guest a mode that full screen letterboxes. */
+        const char *initial_size = getenv("PVG_OOP_INITIAL_SIZE");
+        unsigned initial_width = 0, initial_height = 0;
+        if (initial_size && sscanf(initial_size, "%ux%u", &initial_width, &initial_height) == 2 &&
+            initial_width >= 640 && initial_height >= 400 &&
+            initial_width <= APPLE_GFX_OOP_MAX_DIMENSION && initial_height <= APPLE_GFX_OOP_MAX_DIMENSION) {
+            frame_width = initial_width; frame_height = initial_height;
+        }
         if (host_pixels && host_mm.width > 0) {
             double mm_per_pixel = host_mm.width / host_pixels;
             display_desc.sizeInMillimeters = NSMakeSize(frame_width * mm_per_pixel,
