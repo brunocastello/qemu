@@ -37,6 +37,8 @@ jobs:
           patch -p1 < "$GITHUB_WORKSPACE/hw/display/vim-display-inprocess.patch"
           # packed vertex formats (INT_2_10_10_10_REV): same patch as the Mojave guest GL pair
           patch -p1 < "$GITHUB_WORKSPACE/hw/display/vim-packed-vertex.patch"
+          # ARB fragment programs multiply with the period rule 0 * x = 0 (Quartz GL, Core Image)
+          patch -p1 < "$GITHUB_WORKSPACE/hw/display/vim-arb-legacy-mul.patch"
           python3 Source/scripts/build-opengl-host.py --output "$GITHUB_WORKSPACE/hostlib"
           lipo -archs "$GITHUB_WORKSPACE/hostlib/libVIMPassthroughOpenGLHost.dylib"
       - name: Hybrid Hypervisor engine (libEngine.a)
