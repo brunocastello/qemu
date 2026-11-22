@@ -1,0 +1,12 @@
+--- a/Source/PassthroughOpenGL/passthrough-opengl-host.c	2026-11-23 00:50:15
++++ b/Source/PassthroughOpenGL/passthrough-opengl-host.c	2026-11-23 00:50:15
+@@ -2464,7 +2464,8 @@
+                 kCGLPFAOpenGLProfile,(CGLPixelFormatAttribute)profile,kCGLPFADepthSize,(CGLPixelFormatAttribute)m->args[1],
+                 kCGLPFAStencilSize,(CGLPixelFormatAttribute)m->args[2],0};
+             if(dg_reference_renderer){attrs[8]=kCGLPFARendererID;attrs[9]=(CGLPixelFormatAttribute)dg_reference_renderer;
+-                attrs[10]=kCGLPFASupportsAutomaticGraphicsSwitching;}
++                attrs[10]=kCGLPFASupportsAutomaticGraphicsSwitching;
++                attrs[0]=kCGLPFAAllowOfflineRenderers;} /* UTM diagnostic: allow Apple's software renderer */
+             CGLPixelFormatObj pf=NULL;GLint count=0;
+             CGLError e=CGLChoosePixelFormat(attrs,&pf,&count);
+             if(!e) e=CGLCreateContext(pf,share ? contexts[share].cgl : NULL,&contexts[s->next].cgl);
