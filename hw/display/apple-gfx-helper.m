@@ -124,6 +124,36 @@ static int helper_app_connect(int frame_fd)
     }
     return fd;
 }
+/* The window's size first (the guest's default), then smaller sizes of the
+ * same aspect ratio, so the guest can pick another one in System Preferences >
+ * Displays and it still fills the window. Sizes of another aspect ratio
+ * (common Mac panels) were letterboxed. */
+static NSArray<PGDisplayMode *> *apple_gfx_helper_modes(uint32_t frame_width, uint32_t frame_height)
+{
+    static const uint32_t extra_widths[] = {
+        3840, 3456, 3200, 3024, 2880, 2560, 2304, 2048, 1920, 1680, 1440, 1280, 1152, 1024,
+    };
+    NSMutableArray<PGDisplayMode *> *modes = [NSMutableArray array];
+    PGDisplayCoord_t resolution = {frame_width, frame_height};
+    PGDisplayMode *mode = [[NSClassFromString(@"PGDisplayMode") alloc]
+        initWithSizeInPixels:resolution refreshRateInHz:60];
+    [modes addObject:mode];
+    [mode release];
+    for (size_t i = 0; i < sizeof(extra_widths) / sizeof(extra_widths[0]); i++) {
+        uint32_t width = extra_widths[i];
+        uint32_t height = (uint32_t)(((uint64_t)width * frame_height / frame_width + 1) & ~1ULL);
+        if (width >= frame_width || height < 600) {
+            continue;
+        }
+        PGDisplayCoord_t size = {width, height};
+        mode = [[NSClassFromString(@"PGDisplayMode") alloc]
+            initWithSizeInPixels:size refreshRateInHz:60];
+        [modes addObject:mode];
+        [mode release];
+    }
+    return modes;
+}
+
 static int helper_main(int argc, char **argv)
 {
     @autoreleasepool {
@@ -443,16 +473,7 @@ static int helper_main(int argc, char **argv)
             [command commit];
         };
         display = [device newDisplayWithDescriptor:display_desc port:0 serialNum:1];
-        /* One mode, the size QEMU was given (UTM: the host's full-screen size), as
-         * VirtualIntelMac does; SET_MODE replaces it when the window is resized.
-         * Extra sizes let the guest pick one of another aspect ratio, which the
-         * window letterboxes. */
-        NSMutableArray<PGDisplayMode *> *modes = [NSMutableArray array];
-        PGDisplayCoord_t resolution = {frame_width, frame_height};
-        PGDisplayMode *mode = [[NSClassFromString(@"PGDisplayMode") alloc]
-            initWithSizeInPixels:resolution refreshRateInHz:60];
-        [modes addObject:mode];
-        [mode release];
+        NSArray<PGDisplayMode *> *modes = apple_gfx_helper_modes(frame_width, frame_height);
         display.modeList = modes;
         AppleGFXOOPReady ready = {APPLE_GFX_OOP_MAGIC, device ? 0 : 1, desc.mmioLength};
         if (!apple_gfx_oop_io(channel, &ready, sizeof(ready), true)) { return 7; }
@@ -488,11 +509,7 @@ static int helper_main(int argc, char **argv)
                         message.width >= 320 && message.width <= APPLE_GFX_OOP_MAX_DIMENSION &&
                         message.height >= 200 && message.height <= APPLE_GFX_OOP_MAX_DIMENSION) {
                         dispatch_async(frames, ^{
-                            PGDisplayCoord_t size = {message.width, message.height};
-                            PGDisplayMode *new_mode = [[NSClassFromString(@"PGDisplayMode") alloc]
-                                initWithSizeInPixels:size refreshRateInHz:60];
-                            display.modeList = @[new_mode];
-                            [new_mode release];
+                            display.modeList = apple_gfx_helper_modes(message.width, message.height);
                         });
                     } else { _exit(48); }
                 }
@@ -523,12 +540,9 @@ static int helper_main(int argc, char **argv)
                     request.offset > APPLE_GFX_OOP_MAX_DIMENSION ||
                     request.value > APPLE_GFX_OOP_MAX_DIMENSION) { request.status = EINVAL; }
                 else {
-                    PGDisplayCoord_t size = {request.offset, request.value};
+                    uint32_t width = (uint32_t)request.offset, height = (uint32_t)request.value;
                     dispatch_async(frames, ^{
-                        PGDisplayMode *mode = [[NSClassFromString(@"PGDisplayMode") alloc]
-                            initWithSizeInPixels:size refreshRateInHz:60];
-                        display.modeList = @[mode];
-                        [mode release];
+                        display.modeList = apple_gfx_helper_modes(width, height);
                     });
                 }
             } else if (request.operation == APPLE_GFX_OOP_RESET) {
