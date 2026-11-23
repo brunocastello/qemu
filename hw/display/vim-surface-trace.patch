@@ -1,0 +1,35 @@
+diff --git a/Source/PassthroughOpenGL/passthrough-opengl-surfaces-host.c b/Source/PassthroughOpenGL/passthrough-opengl-surfaces-host.c
+index 73f31818..a224be8f 100644
+--- a/Source/PassthroughOpenGL/passthrough-opengl-surfaces-host.c
++++ b/Source/PassthroughOpenGL/passthrough-opengl-surfaces-host.c
+@@ -321,6 +321,8 @@ static GLenum DGSurfaceRetire(struct DGHostContext *c,struct DGSurfaceLease *p)
+ static GLenum DGSurfaceDrawable(struct DGHostContext *c,struct DGSurfaceLease *p)
+ {
+     struct DGSharedSurface *s=p->resource;
++    if(getenv("VIM_TRACE_SURFACES"))fprintf(stderr,"VIMSURF attach ctx=%p drawable=%dx%d dbl=%d surface=%p %dx%d shared=%d\n",(void *)c,
++        c->drawable?c->drawable->width:-1,c->drawable?c->drawable->height:-1,c->double_buffer,(void *)s->surface,s->width,s->height,c->shared_surface==s);
+     if(!c->drawable || c->double_buffer || c->drawable->width!=s->width ||
+        c->drawable->height!=s->height)return GL_INVALID_OPERATION;
+     pthread_mutex_lock(&s->access);
+@@ -500,6 +502,12 @@ static int DGSurfaceCommandImpl(struct DGHostContext *c,struct DGMessage *m,stru
+            m->bytes!=count*sizeof(struct DGSurfaceRegion) || !c->drawable ||
+            (m->args[5] && !c->double_buffer)) { r->error=GL_INVALID_VALUE;return 0; }
+         const struct DGSurfaceRegion *regions=(const void *)(m+1);
++        if(getenv("VIM_TRACE_SURFACES")){static unsigned n;if(n<400){++n;
++            fprintf(stderr,"VIMSURF publish ctx=%p drawable=%dx%d surface=%p %dx%d shared=%d flip=%llu back=%llu seal=%d n=%u",(void *)c,c->drawable->width,
++                c->drawable->height,(void *)s->surface,s->width,s->height,c->shared_surface==s,m->args[4],m->args[5],seal,count);
++            for(unsigned i=0;i<count&&i<4;++i)fprintf(stderr," [%d,%d %dx%d ->%d,%d]",regions[i].x,regions[i].y,regions[i].width,regions[i].height,
++                regions[i].destination_x,regions[i].destination_y);
++            fputc('\n',stderr);}}
+         /* Validate the complete clip before modifying any pixel. Reject
+          * overlaps so clip-list ordering cannot silently change semantics. */
+         for(unsigned i=0;i<count;++i) {
+@@ -571,6 +579,8 @@ static int DGSurfaceCommandImpl(struct DGHostContext *c,struct DGMessage *m,stru
+         }
+     } else if(m->op==DG_SURFACE_BIND) {
+         GLint texture=0;glGetIntegerv(GL_TEXTURE_BINDING_RECTANGLE_ARB,&texture);
++        if(getenv("VIM_TRACE_SURFACES"))fprintf(stderr,"VIMSURF bind ctx=%p texture=%d surface=%p %dx%d req=%llux%llu\n",(void *)c,texture,
++            (void *)p->resource->surface,p->resource->width,p->resource->height,m->args[2],m->args[3]);
+         GLenum internal=(GLenum)m->args[1];
+         uint64_t width=m->args[2],height=m->args[3];
+         if(!width && !height) { width=p->resource->width;height=p->resource->height; }
