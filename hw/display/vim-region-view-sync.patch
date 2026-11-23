@@ -1,0 +1,111 @@
+diff --git a/Source/PassthroughOpenGL/passthrough-opengl-alias-host.c b/Source/PassthroughOpenGL/passthrough-opengl-alias-host.c
+index dd4ba600..e48d9f77 100644
+--- a/Source/PassthroughOpenGL/passthrough-opengl-alias-host.c
++++ b/Source/PassthroughOpenGL/passthrough-opengl-alias-host.c
+@@ -326,6 +326,8 @@ static int DGBackdropWritesSampledAtlas(struct DGHostContext *c)
+ static void DGPrepareDrawableAliases(struct DGHostContext *c,int unknown_list_bindings)
+ {
+     struct DGAliasGroup *g=c->alias_group;
++    if(!c->inside_begin && c->drawable && c->drawable->view_surface && g && g->aliases &&
++       c->drawable->view_serial!=c->drawable->write_serial)DGSyncRegionView(c);
+     if(c->inside_begin || !c->drawable || !c->drawable->alias_dirty || !c->color_storage || !g || !g->aliases)return;
+     GLuint target=IOSurfaceGetID(c->color_storage),back=c->back_storage?IOSurfaceGetID(c->back_storage):0;
+     int feedback=unknown_list_bindings;
+diff --git a/Source/PassthroughOpenGL/passthrough-opengl-host.c b/Source/PassthroughOpenGL/passthrough-opengl-host.c
+index f3b6e05d..bc5df6d9 100644
+--- a/Source/PassthroughOpenGL/passthrough-opengl-host.c
++++ b/Source/PassthroughOpenGL/passthrough-opengl-host.c
+@@ -215,6 +215,10 @@ struct DGHostDrawable {
+     int prepared; // Explicit private-attach reservation; never ordinary MakeCurrent.
+     struct DGDamage damage;
+     int alias_dirty;
++    /* UTM: drawable imported as a region view of a shared surface (window
++     * backing larger than the drawable). Native GL renders such a drawable
++     * in place, so later draws that sample the surface see current pixels. */
++    uint32_t view_lease;GLuint view_surface;int view_x,view_y,view_width,view_height,view_flip;uint64_t view_serial;
+ #ifdef VIM_BACKING_CANONICAL_EXPERIMENT
+     int scope_canonical;
+ #endif
+@@ -409,6 +413,7 @@ struct DGAliasGroup;
+ static void DGDestroySyncs(struct DGAliasGroup *);
+ static void DGDestroyMappings(struct DGAliasGroup *);
+ static void DGRefreshFlippedAliases(struct DGHostContext *,int);
++static void DGSyncRegionView(struct DGHostContext *c);
+ #include "passthrough-opengl-alias-host.c"
+ #include "passthrough-opengl-purgeable-host.c"
+ #include "direct-uniform-query-host.c"
+diff --git a/Source/PassthroughOpenGL/passthrough-opengl-surfaces-host.c b/Source/PassthroughOpenGL/passthrough-opengl-surfaces-host.c
+index a224be8f..ad8e719a 100644
+--- a/Source/PassthroughOpenGL/passthrough-opengl-surfaces-host.c
++++ b/Source/PassthroughOpenGL/passthrough-opengl-surfaces-host.c
+@@ -238,6 +238,56 @@ static uint32_t DGSurfaceAcquire(struct DGHostContext *c,uint64_t resource,uint6
+  * Coordinates are GL bottom-up; flip reverses only the destination rectangle.
+  * Callers serialize resource access and publish an epoch after all clip pieces.
+  * This primitive alone does NOT make guest CPU access coherent. */
++/* UTM: keep a region-view drawable and its backing surface coherent. Before a
++ * draw samples the backing (e.g. Quartz GL's masked window self-copy behind a
++ * pulsing default button), write the drawable's current pixels back into its
++ * region with the inverse of the import blit, then flush and rebind the
++ * sampling textures as CGLIOSurface.h requires. GPU blit only, no CPU copy. */
++static void DGSyncRegionView(struct DGHostContext *c)
++{
++    struct DGHostDrawable *d=c->drawable;
++    GLint units[1024];int count=0,active=0;
++    glGetIntegerv(GL_ACTIVE_TEXTURE,&active);
++    for(GLint unit=0;unit<c->texture_units&&unit<1024;++unit){
++        GLint name=0;glActiveTexture(GL_TEXTURE0+unit);glGetIntegerv(GL_TEXTURE_BINDING_RECTANGLE_ARB,&name);
++        for(struct DGAlias *a=c->alias_group->aliases;name&&a;a=a->next)
++            if(a->texture==(GLuint)name&&a->storage==d->view_surface){units[count++]=unit;break;}
++    }
++    glActiveTexture((GLenum)active);
++    if(!count)return; // Not sampled by this draw; stay pending.
++    struct DGSurfaceLease *p=DGSurfaceFind(c,d->view_lease);
++    if(!p||!p->resource||IOSurfaceGetID(p->resource->surface)!=d->view_surface||
++       d->view_width>d->width||d->view_height>d->height){d->view_surface=0;return;}
++    struct DGSharedSurface *s=p->resource;
++    pthread_mutex_lock(&s->access);
++    if(s->retired){pthread_mutex_unlock(&s->access);d->view_surface=0;return;}
++    GLenum prior=glGetError();if(prior&&!c->error)c->error=prior;
++    GLint read=0,draw=0,source_read=0,destination_draw=0;
++    glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING_EXT,&read);glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING_EXT,&draw);
++    GLboolean scissor=glIsEnabled(GL_SCISSOR_TEST),srgb=glIsEnabled(GL_FRAMEBUFFER_SRGB_EXT);
++    glBindFramebufferEXT(GL_READ_FRAMEBUFFER_EXT,c->framebuffer);glGetIntegerv(GL_READ_BUFFER,&source_read);
++    glBindFramebufferEXT(GL_DRAW_FRAMEBUFFER_EXT,p->framebuffer);glGetIntegerv(GL_DRAW_BUFFER,&destination_draw);
++    glReadBuffer(GL_COLOR_ATTACHMENT0_EXT);glDrawBuffer(GL_COLOR_ATTACHMENT0_EXT);
++    DGSetBlitScissor(c,GL_FALSE);glDisable(GL_FRAMEBUFFER_SRGB_EXT);
++    int w=d->view_width,h=d->view_height;
++    glBlitFramebufferEXT(0,d->view_flip?h:0,w,d->view_flip?0:h,
++        d->view_x,d->view_y,d->view_x+w,d->view_y+h,GL_COLOR_BUFFER_BIT,GL_NEAREST);
++    glReadBuffer((GLenum)source_read);glDrawBuffer((GLenum)destination_draw);
++    glBindFramebufferEXT(GL_READ_FRAMEBUFFER_EXT,(GLuint)read);glBindFramebufferEXT(GL_DRAW_FRAMEBUFFER_EXT,(GLuint)draw);
++    if(scissor)DGSetBlitScissor(c,GL_TRUE);if(srgb)glEnable(GL_FRAMEBUFFER_SRGB_EXT);
++    glFlush();
++    for(int i=0;i<count;++i){
++        GLint name=0;glActiveTexture(GL_TEXTURE0+units[i]);glGetIntegerv(GL_TEXTURE_BINDING_RECTANGLE_ARB,&name);
++        glBindTexture(GL_TEXTURE_RECTANGLE_ARB,(GLuint)name);
++    }
++    glActiveTexture((GLenum)active);
++    GLenum error=glGetError();if(error&&!c->error)c->error=error;
++    d->view_serial=d->write_serial;
++    pthread_mutex_unlock(&s->access);
++    static unsigned traced;
++    if(getenv("VIM_TRACE_SURFACES")&&traced<40){++traced;
++        fprintf(stderr,"VIMSURF sync ctx=%p drawable=%dx%d -> %d,%d flip=%d units=%d error=%x\n",(void *)c,w,h,d->view_x,d->view_y,d->view_flip,count,error);}
++}
+ static GLenum DGSurfacePublishRectCommands(struct DGHostContext *c,struct DGSurfaceLease *p,
+     int x,int y,int width,int height,int destination_x,int destination_y,int flip,int back,int submit)
+ {
+@@ -485,6 +535,13 @@ static int DGSurfaceCommandImpl(struct DGHostContext *c,struct DGMessage *m,stru
+             DGSetBlitScissor(c,GL_FALSE);glDisable(GL_FRAMEBUFFER_SRGB_EXT);
+             glBlitFramebufferEXT((GLint)x,(GLint)y,(GLint)(x+w),(GLint)(y+h),
+                 (GLint)dx,(GLint)(dy+(m->args[6]?h:0)),(GLint)(dx+w),(GLint)(dy+(m->args[6]?0:h)),GL_COLOR_BUFFER_BIT,GL_NEAREST);
++            if(!patch){
++                struct DGHostDrawable *d=c->drawable;
++                d->view_lease=p->name;d->view_surface=IOSurfaceGetID(s->surface);d->view_x=(int)x;d->view_y=(int)y;
++                d->view_width=(int)w;d->view_height=(int)h;d->view_flip=(int)m->args[6];d->view_serial=d->write_serial;
++                if(getenv("VIM_TRACE_SURFACES"))fprintf(stderr,"VIMSURF import ctx=%p drawable=%dx%d surface=%p %dx%d at %d,%d flip=%d\n",(void *)c,
++                    d->width,d->height,(void *)s->surface,s->width,s->height,(int)x,(int)y,(int)m->args[6]);
++            }
+             glReadBuffer(source_read);glDrawBuffer(destination_draw);
+             glBindFramebufferEXT(GL_READ_FRAMEBUFFER_EXT,read);glBindFramebufferEXT(GL_DRAW_FRAMEBUFFER_EXT,draw);
+             if(scissor)DGSetBlitScissor(c,GL_TRUE);if(srgb)glEnable(GL_FRAMEBUFFER_SRGB_EXT);
