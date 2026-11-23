@@ -2,7 +2,10 @@ name: Build SL GLEngine (diag)
 # Debug only: rebuild the x86_64 slices of the Snow Leopard PassthroughOpenGL guest pair
 # (GLEngine + libVIMPassthroughOpenGL) from the pinned VirtualIntelMac source with
 # hw/display/vim-guest-self-sample.patch, and lipo them into the prebuilt universal binaries.
-on: workflow_dispatch
+on:
+  push:
+    branches: [sl-qgl-diag]
+    paths: ['hw/display/vim-guest-self-sample.patch', '.github/workflows/build-sl-glengine.yml']
 jobs:
   build:
     runs-on: xcode-27
