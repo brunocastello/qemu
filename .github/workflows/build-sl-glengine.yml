@@ -16,7 +16,7 @@ jobs:
           set -euo pipefail
           VIM_COMMIT=2861da9e265e557aef90319e4451487ed1fed553
           git clone -q --filter=blob:none --no-checkout https://github.com/nfzerox/VirtualIntelMacOnAppleSilicon.git vim
-          git -C vim checkout -q "$VIM_COMMIT" -- Source/PassthroughOpenGL Source/scripts Source/compat Source/probes \
+          git -C vim checkout -q "$VIM_COMMIT" -- Source/PassthroughOpenGL Source/scripts Source/compat Source/probes Source/vendor/source/VMsvga2 \
             Source/prebuilt/PassthroughOpenGL/snowleopard/GuestTools
           for v in 10.9 10.6; do
             curl -sfL -o sdk.tar.xz "https://github.com/phracker/MacOSX-SDKs/releases/download/11.3/MacOSX$v.sdk.tar.xz"
