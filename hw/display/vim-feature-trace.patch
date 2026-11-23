@@ -1,0 +1,27 @@
+--- a/Source/PassthroughOpenGL/passthrough-opengl-diagnostics.c	2026-11-23 01:04:31
++++ b/Source/PassthroughOpenGL/passthrough-opengl-diagnostics.c	2026-11-23 01:04:31
+@@ -210,6 +210,24 @@
+     const struct DGVertexArray *arrays,unsigned count)
+ {
+     if(!dg_diagnostics) return;
++    if(getenv("VIM_TRACE_FEATURES")){
++        /* UTM diagnostic: draw state Metal-backed GL may not implement */
++        static uint64_t seen[256];static unsigned nseen;
++        unsigned f=(glIsEnabled(GL_POINT_SMOOTH)?1u:0)|(glIsEnabled(GL_LINE_SMOOTH)?2u:0)|(glIsEnabled(GL_POLYGON_SMOOTH)?4u:0)|
++            (glIsEnabled(GL_COLOR_LOGIC_OP)?16u:0)|(glIsEnabled(GL_SAMPLE_ALPHA_TO_COVERAGE)?32u:0)|
++            (glIsEnabled(GL_POLYGON_STIPPLE)?64u:0)|(glIsEnabled(GL_LINE_STIPPLE)?128u:0)|(glIsEnabled(GL_ALPHA_TEST)?256u:0)|
++            (glIsEnabled(GL_BLEND)?512u:0)|(glIsEnabled(GL_TEXTURE_2D)?1024u:0)|(glIsEnabled(GL_TEXTURE_RECTANGLE_ARB)?2048u:0);
++        GLint poly[2]={0},src=0,dst=0,srca=0,dsta=0,eq=0,logic=0,env=0,mask[4]={0};
++        glGetIntegerv(GL_POLYGON_MODE,poly);glGetIntegerv(GL_BLEND_SRC_RGB,&src);glGetIntegerv(GL_BLEND_DST_RGB,&dst);
++        glGetIntegerv(GL_BLEND_SRC_ALPHA,&srca);glGetIntegerv(GL_BLEND_DST_ALPHA,&dsta);glGetIntegerv(GL_BLEND_EQUATION_RGB,&eq);
++        glGetIntegerv(GL_LOGIC_OP_MODE,&logic);glGetTexEnviv(GL_TEXTURE_ENV,GL_TEXTURE_ENV_MODE,&env);glGetIntegerv(GL_COLOR_WRITEMASK,mask);
++        uint64_t k=(uint64_t)f^((uint64_t)poly[0]<<12)^((uint64_t)src<<20)^((uint64_t)dst<<28)^((uint64_t)srca<<36)^((uint64_t)dsta<<44)^
++            ((uint64_t)env<<52)^((uint64_t)logic<<5)^((uint64_t)(mask[0]|mask[1]<<1|mask[2]<<2|mask[3]<<3)<<60);
++        unsigned i=0;for(;i<nseen;++i)if(seen[i]==k)break;
++        if(i==nseen&&nseen<256){seen[nseen++]=k;
++            fprintf(stderr,"VIMFEAT ctx=%p f=%x poly=%x blend=%x,%x/%x,%x eq=%x logic=%x env=%x mask=%d%d%d%d count=%u\n",(void *)c,f,poly[0],
++                src,dst,srca,dsta,eq,logic,env,mask[0],mask[1],mask[2],mask[3],count);}
++    }
+     const char *folder=getenv("VIM_PASSTHROUGH_OPENGL_TRACE_DIR");
+     int geometry=getenv("VIM_PASSTHROUGH_OPENGL_TRACE_GEOMETRY")!=NULL;
+     if(!folder || c->program_debug_count>=(geometry?256u:32u)) return;

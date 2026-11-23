@@ -42,6 +42,7 @@ jobs:
           # drawables bound as GL_RGB keep their BGRA alpha for rendering (Quartz GL)
           patch -p1 < "$GITHUB_WORKSPACE/hw/display/vim-drawable-rgba.patch"
           patch -p1 < "$GITHUB_WORKSPACE/hw/display/vim-ref-renderer.patch"
+          patch -p1 < "$GITHUB_WORKSPACE/hw/display/vim-feature-trace.patch"
           python3 Source/scripts/build-opengl-host.py --output "$GITHUB_WORKSPACE/hostlib"
           lipo -archs "$GITHUB_WORKSPACE/hostlib/libVIMPassthroughOpenGLHost.dylib"
       - name: Hybrid Hypervisor engine (libEngine.a)
