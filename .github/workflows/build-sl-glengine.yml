@@ -1,0 +1,47 @@
+name: Build SL GLEngine (diag)
+# Debug only: rebuild the x86_64 slices of the Snow Leopard PassthroughOpenGL guest pair
+# (GLEngine + libVIMPassthroughOpenGL) from the pinned VirtualIntelMac source with
+# hw/display/vim-guest-self-sample.patch, and lipo them into the prebuilt universal binaries.
+on: workflow_dispatch
+jobs:
+  build:
+    runs-on: xcode-27
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch VirtualIntelMac sources and SDKs
+        run: |
+          set -euo pipefail
+          VIM_COMMIT=2861da9e265e557aef90319e4451487ed1fed553
+          git clone -q --filter=blob:none --no-checkout https://github.com/nfzerox/VirtualIntelMacOnAppleSilicon.git vim
+          git -C vim checkout -q "$VIM_COMMIT" -- Source/PassthroughOpenGL Source/scripts Source/compat Source/probes \
+            Source/prebuilt/PassthroughOpenGL/snowleopard/GuestTools
+          for v in 10.9 10.6; do
+            curl -sfL -o sdk.tar.xz "https://github.com/phracker/MacOSX-SDKs/releases/download/11.3/MacOSX$v.sdk.tar.xz"
+            shasum -a 256 sdk.tar.xz; tar -xf sdk.tar.xz; rm sdk.tar.xz
+          done
+          ls -d MacOSX*.sdk
+      - name: Build x86_64 guest pair
+        run: |
+          set -euo pipefail
+          cd vim
+          patch -p1 < "$GITHUB_WORKSPACE/hw/display/vim-guest-self-sample.patch"
+          S=Source/scripts/build-opengl-guest-gl-pair
+          n=$(grep -n '^install_name_tool -change' "$S" | cut -d: -f1)
+          head -n "$n" "$S" | sed -e 's/ -arch i386//' -e 's/ -Werror / -Wno-error /' > build-pair.sh
+          chmod +x build-pair.sh; cp build-pair.sh Source/scripts/build-pair-x64
+          VIM_OPENGL_CC="$(xcrun -f clang)" VIM_OPENGL_SDK="$GITHUB_WORKSPACE/MacOSX10.9.sdk" \
+          VIM_OPENGL_WIRE_SDK="$GITHUB_WORKSPACE/MacOSX10.9.sdk" VIM_OPENGL_DISPATCH_SDK="$GITHUB_WORKSPACE/MacOSX10.6.sdk" \
+          VIM_OPENGL_MIN_VERSION=10.6 VIM_GUEST_GL_PAIR_BUILD="$GITHUB_WORKSPACE/out" Source/scripts/build-pair-x64
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+          P=Source/prebuilt/PassthroughOpenGL/snowleopard/GuestTools
+          for b in GLEngine libVIMPassthroughOpenGL.dylib; do
+            lipo -info "$P/$b" "$GITHUB_WORKSPACE/out/$b"
+            lipo "$P/$b" -replace x86_64 "$GITHUB_WORKSPACE/out/$b" -output "$GITHUB_WORKSPACE/dist/$b"
+            codesign --force --sign - --digest-algorithm=sha1,sha256 "$GITHUB_WORKSPACE/dist/$b"
+            lipo -info "$GITHUB_WORKSPACE/dist/$b"
+          done
+          otool -L "$GITHUB_WORKSPACE/dist/GLEngine" | head
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sl-glengine
+          path: dist
