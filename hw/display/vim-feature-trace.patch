@@ -1,6 +1,6 @@
 --- a/Source/PassthroughOpenGL/passthrough-opengl-diagnostics.c	2026-11-23 01:04:31
-+++ b/Source/PassthroughOpenGL/passthrough-opengl-diagnostics.c	2026-11-23 01:04:31
-@@ -210,6 +210,24 @@
++++ b/Source/PassthroughOpenGL/passthrough-opengl-diagnostics.c	2026-11-23 01:15:17
+@@ -210,6 +210,38 @@
      const struct DGVertexArray *arrays,unsigned count)
  {
      if(!dg_diagnostics) return;
@@ -17,10 +17,24 @@
 +        glGetIntegerv(GL_LOGIC_OP_MODE,&logic);glGetTexEnviv(GL_TEXTURE_ENV,GL_TEXTURE_ENV_MODE,&env);glGetIntegerv(GL_COLOR_WRITEMASK,mask);
 +        uint64_t k=(uint64_t)f^((uint64_t)poly[0]<<12)^((uint64_t)src<<20)^((uint64_t)dst<<28)^((uint64_t)srca<<36)^((uint64_t)dsta<<44)^
 +            ((uint64_t)env<<52)^((uint64_t)logic<<5)^((uint64_t)(mask[0]|mask[1]<<1|mask[2]<<2|mask[3]<<3)<<60);
++        char combine[512]="";size_t used=0;GLint active=0;glGetIntegerv(GL_ACTIVE_TEXTURE,&active);
++        for(int u=0;u<3;++u){glActiveTexture(GL_TEXTURE0+u);GLint e=0;glGetTexEnviv(GL_TEXTURE_ENV,GL_TEXTURE_ENV_MODE,&e);
++            int on=glIsEnabled(GL_TEXTURE_2D)||glIsEnabled(GL_TEXTURE_RECTANGLE_ARB);GLint fmt=0,tex=0;
++            glGetIntegerv(glIsEnabled(GL_TEXTURE_RECTANGLE_ARB)?GL_TEXTURE_BINDING_RECTANGLE_ARB:GL_TEXTURE_BINDING_2D,&tex);
++            if(tex)glGetTexLevelParameteriv(glIsEnabled(GL_TEXTURE_RECTANGLE_ARB)?GL_TEXTURE_RECTANGLE_ARB:GL_TEXTURE_2D,0,GL_TEXTURE_INTERNAL_FORMAT,&fmt);
++            GLint v[16]={0};GLenum q[16]={GL_COMBINE_RGB,GL_COMBINE_ALPHA,GL_SOURCE0_RGB,GL_SOURCE1_RGB,GL_SOURCE2_RGB,GL_SOURCE0_ALPHA,GL_SOURCE1_ALPHA,GL_SOURCE2_ALPHA,
++                GL_OPERAND0_RGB,GL_OPERAND1_RGB,GL_OPERAND2_RGB,GL_OPERAND0_ALPHA,GL_OPERAND1_ALPHA,GL_OPERAND2_ALPHA,0,0};
++            if(e==GL_COMBINE)for(int j=0;j<14;++j)glGetTexEnviv(GL_TEXTURE_ENV,q[j],&v[j]);
++            GLfloat sr=0,sa=0;glGetTexEnvfv(GL_TEXTURE_ENV,GL_RGB_SCALE,&sr);glGetTexEnvfv(GL_TEXTURE_ENV,GL_ALPHA_SCALE,&sa);
++            int w=snprintf(combine+used,sizeof(combine)-used," u%d[on=%d fmt=%x env=%x c=%x,%x s=%x,%x,%x/%x,%x,%x o=%x,%x,%x/%x,%x,%x sc=%g,%g]",u,on,fmt,e,
++                v[0],v[1],v[2],v[3],v[4],v[5],v[6],v[7],v[8],v[9],v[10],v[11],v[12],v[13],sr,sa);
++            if(w>0&&(size_t)w<sizeof(combine)-used)used+=(size_t)w;
++            k^=((uint64_t)(e^fmt^(v[0]<<3)^(v[1]<<6)^(v[8]<<9)^(v[11]<<12)^(int)(sr*7)^(int)(sa*13)^on)<<(u*7));}
++        glActiveTexture((GLenum)active);
 +        unsigned i=0;for(;i<nseen;++i)if(seen[i]==k)break;
 +        if(i==nseen&&nseen<256){seen[nseen++]=k;
-+            fprintf(stderr,"VIMFEAT ctx=%p f=%x poly=%x blend=%x,%x/%x,%x eq=%x logic=%x env=%x mask=%d%d%d%d count=%u\n",(void *)c,f,poly[0],
-+                src,dst,srca,dsta,eq,logic,env,mask[0],mask[1],mask[2],mask[3],count);}
++            fprintf(stderr,"VIMFEAT ctx=%p f=%x poly=%x blend=%x,%x/%x,%x eq=%x logic=%x env=%x mask=%d%d%d%d count=%u%s\n",(void *)c,f,poly[0],
++                src,dst,srca,dsta,eq,logic,env,mask[0],mask[1],mask[2],mask[3],count,combine);}
 +    }
      const char *folder=getenv("VIM_PASSTHROUGH_OPENGL_TRACE_DIR");
      int geometry=getenv("VIM_PASSTHROUGH_OPENGL_TRACE_GEOMETRY")!=NULL;
