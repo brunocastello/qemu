@@ -1,6 +1,6 @@
 --- a/Source/PassthroughOpenGL/passthrough-opengl-diagnostics.c	2026-11-23 01:04:31
 +++ b/Source/PassthroughOpenGL/passthrough-opengl-diagnostics.c	2026-11-23 01:15:17
-@@ -210,6 +210,38 @@
+@@ -210,6 +210,86 @@
      const struct DGVertexArray *arrays,unsigned count)
  {
      if(!dg_diagnostics) return;
@@ -35,6 +35,54 @@
 +        if(i==nseen&&nseen<256){seen[nseen++]=k;
 +            fprintf(stderr,"VIMFEAT ctx=%p f=%x poly=%x blend=%x,%x/%x,%x eq=%x logic=%x env=%x mask=%d%d%d%d count=%u%s\n",(void *)c,f,poly[0],
 +                src,dst,srca,dsta,eq,logic,env,mask[0],mask[1],mask[2],mask[3],count,combine);}
++    }
++    {   /* UTM diagnostic: VIM_PIXEL_WITNESS=W,H,x,y (GL coords) logs which draw changed that pixel; armed by TRACE_DIR/arm */
++        static int pw=-1,ph,px,py,armed;static unsigned lines,nsz;static uint32_t lastpx,szs[32];static char arm[1024],prev[700]="(start)";
++        if(pw<0){const char *e=getenv("VIM_PIXEL_WITNESS"),*d=getenv("VIM_PASSTHROUGH_OPENGL_TRACE_DIR");
++            if(!e||!d||sscanf(e,"%d,%d,%d,%d",&pw,&ph,&px,&py)!=4)pw=0;else snprintf(arm,sizeof(arm),"%s/arm",d);}
++        if(pw>0&&!armed&&!access(arm,F_OK)){armed=1;fprintf(stderr,"VIMPIX armed\n");}
++        if(pw>0&&armed&&lines<6000&&c->drawable){
++            GLint draw=0;glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING_EXT,&draw);
++            uint32_t sz=(uint32_t)c->drawable->width<<16|(uint32_t)c->drawable->height;unsigned z=0;
++            for(;z<nsz;++z)if(szs[z]==sz)break;
++            if(z==nsz&&nsz<32){szs[nsz++]=sz;fprintf(stderr,"VIMPIX surface ctx=%p drawable=%u %dx%d fbo=%d/%u\n",(void *)c,c->drawable->name,
++                c->drawable->width,c->drawable->height,draw,c->framebuffer);}
++            if(c->drawable->width==pw&&c->drawable->height==ph&&(GLuint)draw==c->framebuffer){
++                GLint read=0,buffer=0,pack=0,vals[6];
++                const GLenum keys[]={GL_PACK_ALIGNMENT,GL_PACK_ROW_LENGTH,GL_PACK_SKIP_PIXELS,GL_PACK_SKIP_ROWS,GL_PACK_ROW_BYTES_APPLE,GL_PACK_SWAP_BYTES};
++                GLenum prior=glGetError();if(prior&&!c->error)c->error=prior;
++                struct DGColorTransfer t;DGCanonicalColorTransfer(c,&t);
++                for(unsigned i=0;i<6;++i){glGetIntegerv(keys[i],vals+i);glPixelStorei(keys[i],i?0:1);}
++                glGetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING,&pack);glBindBuffer(GL_PIXEL_PACK_BUFFER,0);
++                glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING_EXT,&read);glBindFramebufferEXT(GL_READ_FRAMEBUFFER_EXT,(GLuint)draw);
++                glGetIntegerv(GL_READ_BUFFER,&buffer);glReadBuffer(GL_COLOR_ATTACHMENT0_EXT);
++                uint32_t p=0;glReadPixels(px,py,1,1,GL_RGBA,GL_UNSIGNED_BYTE,&p);GLenum err=glGetError();
++                glReadBuffer((GLenum)buffer);glBindFramebufferEXT(GL_READ_FRAMEBUFFER_EXT,(GLuint)read);
++                glBindBuffer(GL_PIXEL_PACK_BUFFER,(GLuint)pack);
++                for(unsigned i=0;i<6;++i)glPixelStorei(keys[i],vals[i]);
++                DGRestoreColorTransfer(&t);
++                if(err){fprintf(stderr,"VIMPIX read error %x\n",err);pw=0;}
++                else{
++                    if(p!=lastpx){++lines;fprintf(stderr,"VIMPIX %08x <- %s\n",p,prev);lastpx=p;}
++                    GLint vp[4]={0},src=0,dst=0,srca=0,dsta=0,eq=0,fp=0,active=0,cc[4]={0};
++                    glGetIntegerv(GL_VIEWPORT,vp);glGetIntegerv(GL_BLEND_SRC_RGB,&src);glGetIntegerv(GL_BLEND_DST_RGB,&dst);
++                    glGetIntegerv(GL_BLEND_SRC_ALPHA,&srca);glGetIntegerv(GL_BLEND_DST_ALPHA,&dsta);glGetIntegerv(GL_BLEND_EQUATION_RGB,&eq);
++                    int fpon=glIsEnabled(GL_FRAGMENT_PROGRAM_ARB);if(fpon)glGetProgramivARB(GL_FRAGMENT_PROGRAM_ARB,GL_PROGRAM_BINDING_ARB,&fp);
++                    glGetIntegerv(GL_CURRENT_COLOR,cc);
++                    int n=snprintf(prev,sizeof(prev),"ctx=%p vp=%d,%d,%d,%d blend=%d:%x,%x/%x,%x eq=%x fp=%d count=%u color=%08x",(void *)c,
++                        vp[0],vp[1],vp[2],vp[3],glIsEnabled(GL_BLEND),src,dst,srca,dsta,eq,fpon?fp:0,count,(unsigned)cc[0]);
++                    glGetIntegerv(GL_ACTIVE_TEXTURE,&active);
++                    for(int u=0;u<3&&n>0&&(size_t)n<sizeof(prev);++u){glActiveTexture(GL_TEXTURE0+u);
++                        int r=glIsEnabled(GL_TEXTURE_RECTANGLE_ARB),d2=glIsEnabled(GL_TEXTURE_2D);GLint tex=0,e=0,fmt=0,w=0,h=0,mf=0,ws=0;
++                        if(!r&&!d2)continue;GLenum tg=r?GL_TEXTURE_RECTANGLE_ARB:GL_TEXTURE_2D;
++                        glGetIntegerv(r?GL_TEXTURE_BINDING_RECTANGLE_ARB:GL_TEXTURE_BINDING_2D,&tex);glGetTexEnviv(GL_TEXTURE_ENV,GL_TEXTURE_ENV_MODE,&e);
++                        glGetTexLevelParameteriv(tg,0,GL_TEXTURE_INTERNAL_FORMAT,&fmt);glGetTexLevelParameteriv(tg,0,GL_TEXTURE_WIDTH,&w);
++                        glGetTexLevelParameteriv(tg,0,GL_TEXTURE_HEIGHT,&h);glGetTexParameteriv(tg,GL_TEXTURE_MIN_FILTER,&mf);glGetTexParameteriv(tg,GL_TEXTURE_WRAP_S,&ws);
++                        n+=snprintf(prev+n,sizeof(prev)-(size_t)n," u%d[%s t=%d %dx%d fmt=%x env=%x min=%x wrap=%x]",u,r?"R":"2D",tex,w,h,fmt,e,mf,ws);}
++                    glActiveTexture((GLenum)active);
++                }
++            }
++        }
 +    }
      const char *folder=getenv("VIM_PASSTHROUGH_OPENGL_TRACE_DIR");
      int geometry=getenv("VIM_PASSTHROUGH_OPENGL_TRACE_GEOMETRY")!=NULL;
