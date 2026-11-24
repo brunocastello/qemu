@@ -129,8 +129,21 @@ Likewise applies to the pci variant only for obvious reasons.
   offset, ring size, ring head (rw), ring tail, reply offset, reply size,
   reply length, doorbell (wo), GL status (write 1 to clear; bits: 0 bad
   head, 1 bad reply expect, 2 write failed, 3 short reply, 4 executor open
-  failed, 5 no GL), reply expect (rw, exact reply bytes to read). The
-  1 MiB command ring and 1 MiB reply area sit in VRAM directly below the
+  failed, 5 no GL, 6 bad reply destination), reply expect (rw, exact reply bytes to read). The
+  1 MiB command ring and 4 MiB reply area sit in VRAM directly below the
   cursor slot and must not be used for the framebuffer. A doorbell
   forwards ring bytes tail..head to the executor, then reads reply expect
-  bytes into the reply area.
+  bytes into the reply area. A doorbell with reply expect 0 only queues
+  the ring bytes for a host worker thread and returns; one with reply
+  expect > 0 first waits for the queue to drain. The GL stream needs at
+  least 16 MiB of VRAM.
+``0850`` - ``085c``
+  Present destination (version 2). Reply destination offset (VRAM byte
+  offset, 0 = reply area), destination pitch (bytes per row), source row
+  bytes (width * 4), flags (bit 0: byte-swap every 32bit pixel, BGRA8 to
+  big-endian xRGB; bit 1: source rows are bottom-up). With destination
+  non-zero and reply expect > 0 the doorbell stores the reply row by row at
+  destination + row * pitch and marks it dirty; reply expect must be a
+  multiple of the row bytes, the rows 4-byte aligned and the rectangle
+  must end below the ring offset, else GL status bit 6 is set and the reply
+  is dropped. The 16 byte reply header read must use destination 0.
