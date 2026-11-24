@@ -38,9 +38,21 @@
 #include "qom/object.h"
 #include "hw/acpi/acpi_aml_interface.h"
 #include "qemu/bswap.h"
+#include "qemu/error-report.h"
+#include "qemu/units.h"
 #include "qemu/log.h"
 #include "system/reset.h"
 #include "trace.h"
+#ifdef __APPLE__
+#include "qemu/sockets.h"
+#include <netinet/tcp.h>
+/* The transport header is all static; only the in-process path is used here */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-function"
+#pragma GCC diagnostic ignored "-Wunused-variable"
+#include "vmware_passthrough_opengl_transport.h"
+#pragma GCC diagnostic pop
+#endif
 
 enum vga_pci_flags {
     PCI_VGA_FLAG_ENABLE_MMIO = 1,
@@ -54,13 +66,48 @@ enum vga_pci_flags {
  * built from brunocastello/QemuMacDrivers utm-accel). Opt-in through the
  * "mac-accel" property; documented in docs/specs/standard-vga.rst.
  * Version 1 provides a hardware cursor only.
+ *
+ * Version 2 adds a byte-stream transport to VirtualIntelMac's in-process
+ * PassthroughOpenGL host executor (VIMGLInprocessAPI, library from env
+ * VIM_PASSTHROUGH_OPENGL_INPROCESS_LIBRARY), for a guest OpenGL/RAVE library.
+ * It is advertised with CAPS bit 1 only when the library loads; otherwise the
+ * bit stays clear (one warning at realize) and the GL registers read 0.
+ *
+ * VRAM layout, from the top (all reserved from the guest's framebuffer):
+ *   vram_size - 0x4000                cursor slot (v1)
+ *   ... - PVMAC_GL_REPLY_SIZE         reply area (device writes, guest reads)
+ *   ... - PVMAC_GL_RING_SIZE          command ring (guest writes, device reads)
+ *
+ * Registers (32-bit LE at BAR2 + 0x800 + offset):
+ *   0x00 ID          'PVMC'                   0x04 VERSION   2
+ *   0x08 CAPS        bit0 cursor, bit1 GL     0x0c STATUS    (v1 cursor errors)
+ *   0x10-0x24        cursor, see v1
+ *   0x28 RING_OFFSET  ro  VRAM byte offset of the command ring
+ *   0x2c RING_SIZE    ro  ring bytes
+ *   0x30 RING_HEAD    rw  guest write index, < RING_SIZE
+ *   0x34 RING_TAIL    ro  device read index, == HEAD after a doorbell
+ *   0x38 REPLY_OFFSET ro  VRAM byte offset of the reply area
+ *   0x3c REPLY_SIZE   ro  reply area bytes
+ *   0x40 REPLY_LEN    ro  bytes the last doorbell stored at REPLY_OFFSET
+ *   0x44 DOORBELL     wo  any value: consume TAIL..HEAD, then fetch reply
+ *   0x48 GL_STATUS    rw1c error bits, PVMAC_GL_ERR_*
+ *   0x4c REPLY_EXPECT rw  exact reply bytes to read on the next doorbell
+ *                          (<= REPLY_SIZE); 0 = no reply. The executor read
+ *                          blocks, so the guest must name the exact span.
+ * RING_HEAD/TAIL are byte indexes; a doorbell handles the wrap.
+ * TODO: the doorbell runs on the vCPU thread; move it to a worker if reply
+ * waits show up in profiles.
  */
 #define PVMAC_OFFSET            0x800
 #define PVMAC_SIZE              0x800
 #define PVMAC_ID_VALUE          0x50564d43  /* 'PVMC' */
-#define PVMAC_VERSION_VALUE     1
+#define PVMAC_VERSION_VALUE     2
 #define PVMAC_CAP_HWCURSOR      (1u << 0)
 #define PVMAC_CURSOR_SLOT_SIZE  0x4000      /* 64 * 64 * 4, top of VRAM */
+#define PVMAC_CAP_GL_STREAM     (1u << 1)
+#define PVMAC_GL_RING_SIZE      (1 * MiB)
+#define PVMAC_GL_REPLY_SIZE     (1 * MiB)
+#define PVMAC_GL_MIN_VRAM       (8 * MiB)   /* leave room for a framebuffer */
 
 enum {
     PVMAC_REG_ID         = 0x00,
@@ -73,7 +120,24 @@ enum {
     PVMAC_REG_CUR_SIZE   = 0x1c,
     PVMAC_REG_CUR_DEFINE = 0x20,
     PVMAC_REG_CUR_OFFSET = 0x24,
+    PVMAC_REG_RING_OFFSET   = 0x28,
+    PVMAC_REG_RING_SIZE     = 0x2c,
+    PVMAC_REG_RING_HEAD     = 0x30,
+    PVMAC_REG_RING_TAIL     = 0x34,
+    PVMAC_REG_REPLY_OFFSET  = 0x38,
+    PVMAC_REG_REPLY_SIZE    = 0x3c,
+    PVMAC_REG_REPLY_LEN     = 0x40,
+    PVMAC_REG_DOORBELL      = 0x44,
+    PVMAC_REG_GL_STATUS     = 0x48,
+    PVMAC_REG_REPLY_EXPECT  = 0x4c,
 };
+
+#define PVMAC_GL_ERR_BAD_HEAD   (1u << 0)
+#define PVMAC_GL_ERR_BAD_EXPECT (1u << 1)
+#define PVMAC_GL_ERR_IO         (1u << 2)   /* write to the executor failed */
+#define PVMAC_GL_ERR_REPLY      (1u << 3)   /* reply short or read failed */
+#define PVMAC_GL_ERR_OPEN       (1u << 4)   /* executor endpoint won't open */
+#define PVMAC_GL_ERR_NO_GL      (1u << 5)   /* doorbell without CAPS bit 1 */
 
 #define PVMAC_CUR_CTRL_VISIBLE  (1u << 0)
 #define PVMAC_STATUS_ERROR      (1u << 1)
@@ -87,6 +151,12 @@ typedef struct PVMACState {
     uint32_t cur_hot;
     uint32_t cur_size;
     bool cur_defined;
+    /* v2 GL transport (migrated in the vga/mac-accel-gl subsection) */
+    uint32_t ring_head;
+    uint32_t ring_tail;
+    uint32_t reply_len;
+    uint32_t reply_expect;
+    uint32_t gl_status;
 } PVMACState;
 
 struct PCIVGAState {
@@ -98,6 +168,10 @@ struct PCIVGAState {
     MemoryRegion mrs[5];
     uint8_t edid[384];
     PVMACState pvmac;
+    bool gl_available;          /* executor library loaded; not migrated */
+#ifdef __APPLE__
+    struct VIMPassthroughOpenGLStream gl_stream;  /* opened on first doorbell */
+#endif
 };
 
 #define TYPE_PCI_VGA "pci-vga"
@@ -139,6 +213,47 @@ static const VMStateDescription vmstate_vga_pci_mac_accel = {
     }
 };
 
+static bool vga_pci_mac_accel_gl_needed(void *opaque)
+{
+    PCIVGAState *d = opaque;
+
+    return vga_pci_mac_accel_needed(d) && d->gl_available;
+}
+
+static int vga_pci_mac_accel_gl_post_load(void *opaque, int version_id)
+{
+    PCIVGAState *d = opaque;
+
+    /* The executor endpoint is not migrated; never trust incoming indexes */
+    if (d->pvmac.ring_head >= PVMAC_GL_RING_SIZE ||
+        d->pvmac.ring_tail >= PVMAC_GL_RING_SIZE) {
+        d->pvmac.ring_head = d->pvmac.ring_tail = 0;
+    }
+    if (d->pvmac.reply_len > PVMAC_GL_REPLY_SIZE) {
+        d->pvmac.reply_len = 0;
+    }
+    if (d->pvmac.reply_expect > PVMAC_GL_REPLY_SIZE) {
+        d->pvmac.reply_expect = 0;
+    }
+    return 0;
+}
+
+static const VMStateDescription vmstate_vga_pci_mac_accel_gl = {
+    .name = "vga/mac-accel-gl",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = vga_pci_mac_accel_gl_needed,
+    .post_load = vga_pci_mac_accel_gl_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32(pvmac.ring_head, PCIVGAState),
+        VMSTATE_UINT32(pvmac.ring_tail, PCIVGAState),
+        VMSTATE_UINT32(pvmac.reply_len, PCIVGAState),
+        VMSTATE_UINT32(pvmac.reply_expect, PCIVGAState),
+        VMSTATE_UINT32(pvmac.gl_status, PCIVGAState),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static const VMStateDescription vmstate_vga_pci = {
     .name = "vga",
     .version_id = 2,
@@ -150,6 +265,7 @@ static const VMStateDescription vmstate_vga_pci = {
     },
     .subsections = (const VMStateDescription * const []) {
         &vmstate_vga_pci_mac_accel,
+        &vmstate_vga_pci_mac_accel_gl,
         NULL
     }
 };
@@ -294,6 +410,150 @@ static uint32_t pvmac_cursor_offset(PCIVGAState *d)
     return d->vga.vram_size - PVMAC_CURSOR_SLOT_SIZE;
 }
 
+static uint32_t pvmac_reply_offset(PCIVGAState *d)
+{
+    return pvmac_cursor_offset(d) - PVMAC_GL_REPLY_SIZE;
+}
+
+static uint32_t pvmac_ring_offset(PCIVGAState *d)
+{
+    return pvmac_reply_offset(d) - PVMAC_GL_RING_SIZE;
+}
+
+#ifdef __APPLE__
+static void pvmac_gl_close(PCIVGAState *d)
+{
+    if (vmsvga_gl_stream_valid(d->gl_stream)) {
+        vmsvga_gl_stream_shutdown(d->gl_stream);
+        vmsvga_gl_stream_close(d->gl_stream);
+    }
+    d->gl_stream = (struct VIMPassthroughOpenGLStream){ .fd = -1 };
+}
+
+/* Write all of buf to the executor; false on error (the data is dropped). */
+static bool pvmac_gl_write_all(PCIVGAState *d, const uint8_t *buf, size_t len)
+{
+    while (len) {
+        ssize_t n = vmsvga_gl_stream_write(d->gl_stream, buf, len);
+
+        if (n < 0 && errno == EINTR) {
+            continue;
+        }
+        if (n <= 0) {
+            return false;
+        }
+        buf += n;
+        len -= n;
+    }
+    return true;
+}
+
+static void pvmac_gl_doorbell(PCIVGAState *d)
+{
+    PVMACState *p = &d->pvmac;
+    uint8_t *vram = d->vga.vram_ptr;
+    uint32_t head = p->ring_head, tail = p->ring_tail;
+    uint32_t expect = p->reply_expect;
+    uint32_t pending;
+    bool ok = true;
+
+    p->reply_len = 0;
+    if (!d->gl_available) {
+        p->gl_status |= PVMAC_GL_ERR_NO_GL;
+        return;
+    }
+    /* Indexes are only ever stored validated, but check again: cheap. */
+    if (head >= PVMAC_GL_RING_SIZE || tail >= PVMAC_GL_RING_SIZE) {
+        p->gl_status |= PVMAC_GL_ERR_BAD_HEAD;
+        p->ring_tail = p->ring_head = 0;
+        return;
+    }
+    if (expect > PVMAC_GL_REPLY_SIZE) {
+        p->gl_status |= PVMAC_GL_ERR_BAD_EXPECT;
+        return;
+    }
+    if (!vmsvga_gl_stream_valid(d->gl_stream)) {
+        d->gl_stream = vmsvga_gl_stream_open(0);
+        if (!vmsvga_gl_stream_valid(d->gl_stream)) {
+            d->gl_stream = (struct VIMPassthroughOpenGLStream){ .fd = -1 };
+            p->gl_status |= PVMAC_GL_ERR_OPEN;
+            p->ring_tail = head;      /* drop, never replay */
+            return;
+        }
+    }
+
+    pending = (head - tail) & (PVMAC_GL_RING_SIZE - 1);
+    trace_vga_pvmac_gl_doorbell(tail, head, pending, expect);
+    if (pending) {
+        const uint8_t *ring = vram + pvmac_ring_offset(d);
+        uint32_t first = MIN(pending, PVMAC_GL_RING_SIZE - tail);
+
+        ok = pvmac_gl_write_all(d, ring + tail, first);
+        if (ok && pending > first) {
+            ok = pvmac_gl_write_all(d, ring, pending - first);
+        }
+        if (!ok) {
+            p->gl_status |= PVMAC_GL_ERR_IO;
+        }
+    }
+    p->ring_tail = head;
+
+    if (ok && expect) {
+        ssize_t n = VIMGLInprocessReadExpected(vim_passthrough_opengl_inprocess,
+                        d->gl_stream.memory,
+                        vram + pvmac_reply_offset(d), expect);
+
+        if (n < 0) {
+            n = 0;
+        }
+        p->reply_len = n;
+        if (n != expect) {
+            p->gl_status |= PVMAC_GL_ERR_REPLY;
+        }
+    }
+    trace_vga_pvmac_gl_done(p->reply_len, p->gl_status);
+}
+
+/* Load the executor library once at realize; never abort when absent. */
+static void pvmac_gl_probe(PCIVGAState *d)
+{
+    const char *path = getenv("VIM_PASSTHROUGH_OPENGL_INPROCESS_LIBRARY");
+
+    d->gl_stream = (struct VIMPassthroughOpenGLStream){ .fd = -1 };
+    if (d->vga.vram_size < PVMAC_GL_MIN_VRAM) {
+        warn_report("vga: mac-accel GL stream disabled: vgamem_mb too small");
+        return;
+    }
+    if (!path) {
+        warn_report("vga: mac-accel GL stream disabled: "
+                    "VIM_PASSTHROUGH_OPENGL_INPROCESS_LIBRARY not set");
+        return;
+    }
+    vmsvga_gl_load_inprocess(path);
+    if (!vim_passthrough_opengl_inprocess) {
+        warn_report("vga: mac-accel GL stream disabled: "
+                    "executor library failed to load");
+        return;
+    }
+    d->gl_available = true;
+}
+#else
+static void pvmac_gl_close(PCIVGAState *d)
+{
+}
+
+static void pvmac_gl_doorbell(PCIVGAState *d)
+{
+    d->pvmac.reply_len = 0;
+    d->pvmac.gl_status |= PVMAC_GL_ERR_NO_GL;
+}
+
+static void pvmac_gl_probe(PCIVGAState *d)
+{
+    warn_report("vga: mac-accel GL stream needs macOS; disabled");
+}
+#endif
+
 static void pvmac_error(PCIVGAState *d, uint32_t code)
 {
     d->pvmac.status = PVMAC_STATUS_ERROR | (code << 8);
@@ -363,7 +623,8 @@ static uint64_t pvmac_read(void *opaque, hwaddr addr, unsigned size)
     case PVMAC_REG_VERSION:
         return PVMAC_VERSION_VALUE;
     case PVMAC_REG_CAPS:
-        return PVMAC_CAP_HWCURSOR;
+        return PVMAC_CAP_HWCURSOR |
+               (d->gl_available ? PVMAC_CAP_GL_STREAM : 0);
     case PVMAC_REG_STATUS:
         return d->pvmac.status;
     case PVMAC_REG_CUR_CTRL:
@@ -376,6 +637,24 @@ static uint64_t pvmac_read(void *opaque, hwaddr addr, unsigned size)
         return d->pvmac.cur_size;
     case PVMAC_REG_CUR_OFFSET:
         return pvmac_cursor_offset(d);
+    case PVMAC_REG_RING_OFFSET:
+        return d->gl_available ? pvmac_ring_offset(d) : 0;
+    case PVMAC_REG_RING_SIZE:
+        return d->gl_available ? PVMAC_GL_RING_SIZE : 0;
+    case PVMAC_REG_RING_HEAD:
+        return d->pvmac.ring_head;
+    case PVMAC_REG_RING_TAIL:
+        return d->pvmac.ring_tail;
+    case PVMAC_REG_REPLY_OFFSET:
+        return d->gl_available ? pvmac_reply_offset(d) : 0;
+    case PVMAC_REG_REPLY_SIZE:
+        return d->gl_available ? PVMAC_GL_REPLY_SIZE : 0;
+    case PVMAC_REG_REPLY_LEN:
+        return d->pvmac.reply_len;
+    case PVMAC_REG_GL_STATUS:
+        return d->pvmac.gl_status;
+    case PVMAC_REG_REPLY_EXPECT:
+        return d->pvmac.reply_expect;
     default:
         return 0;
     }
@@ -403,6 +682,29 @@ static void pvmac_write(void *opaque, hwaddr addr, uint64_t val, unsigned size)
     case PVMAC_REG_CUR_DEFINE:
         pvmac_cursor_define(d);
         break;
+    case PVMAC_REG_RING_HEAD:
+        if (val >= PVMAC_GL_RING_SIZE) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "vga: mac-accel ring head 0x%" PRIx64 " out of range\n",
+                          (uint64_t)val);
+            d->pvmac.gl_status |= PVMAC_GL_ERR_BAD_HEAD;
+        } else {
+            d->pvmac.ring_head = val;
+        }
+        break;
+    case PVMAC_REG_REPLY_EXPECT:
+        if (val > PVMAC_GL_REPLY_SIZE) {
+            d->pvmac.gl_status |= PVMAC_GL_ERR_BAD_EXPECT;
+        } else {
+            d->pvmac.reply_expect = val;
+        }
+        break;
+    case PVMAC_REG_DOORBELL:
+        pvmac_gl_doorbell(d);
+        break;
+    case PVMAC_REG_GL_STATUS:
+        d->pvmac.gl_status &= ~(uint32_t)val;
+        break;
     default:
         qemu_log_mask(LOG_GUEST_ERROR,
                       "vga: mac-accel write to read-only/unknown register "
@@ -423,6 +725,7 @@ static void pvmac_reset(void *opaque)
 {
     PCIVGAState *d = opaque;
 
+    pvmac_gl_close(d);
     memset(&d->pvmac, 0, sizeof(d->pvmac));
 }
 
@@ -497,6 +800,7 @@ static void pci_std_vga_realize(PCIDevice *dev, Error **errp)
                 error_setg(errp, "mac-accel needs vgamem_mb >= 1");
                 return;
             }
+            pvmac_gl_probe(d);
             memory_region_init_io(&d->mrs[4], OBJECT(dev), &pvmac_ops, d,
                                   "mac-accel regs", PVMAC_SIZE);
             memory_region_add_subregion(&d->mmio, PVMAC_OFFSET, &d->mrs[4]);

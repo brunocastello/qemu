@@ -101,9 +101,10 @@ Likewise applies to the pci variant only for obvious reasons.
 ``0800``
   ID, reads ``0x50564d43`` (``'PVMC'``).
 ``0804``
-  version, reads 1.
+  version, reads 2 (1: cursor only; 2 adds the GL stream registers below).
 ``0808``
-  capabilities. Bit 0: hardware cursor.
+  capabilities. Bit 0: hardware cursor. Bit 1: GL stream available (the
+  PassthroughOpenGL in-process executor library was loaded).
 ``080c``
   status. Bit 1 is set when the last cursor definition was rejected;
   bits 8-15 hold the reason (1: size, 2: hotspot).
@@ -123,3 +124,13 @@ Likewise applies to the pci variant only for obvious reasons.
 ``0824``
   cursor slot offset in VRAM (read only). The slot is the last 16 KiB of
   VRAM; the guest must not use it for the framebuffer.
+``0828`` - ``084c``
+  GL stream (version 2, capabilities bit 1; all read 0 otherwise): ring
+  offset, ring size, ring head (rw), ring tail, reply offset, reply size,
+  reply length, doorbell (wo), GL status (write 1 to clear; bits: 0 bad
+  head, 1 bad reply expect, 2 write failed, 3 short reply, 4 executor open
+  failed, 5 no GL), reply expect (rw, exact reply bytes to read). The
+  1 MiB command ring and 1 MiB reply area sit in VRAM directly below the
+  cursor slot and must not be used for the framebuffer. A doorbell
+  forwards ring bytes tail..head to the executor, then reads reply expect
+  bytes into the reply area.
