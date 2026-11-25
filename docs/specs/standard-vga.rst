@@ -139,13 +139,13 @@ Likewise applies to the pci variant only for obvious reasons.
   least 16 MiB of VRAM.
 ``0850`` - ``085c``
   Present destination (version 2). Reply destination offset (VRAM byte
-  offset, 0 = reply area), destination pitch (bytes per row), source row
+  offset; 0 is valid), destination pitch (bytes per row), source row
   bytes (width * 4), flags (bit 0: byte-swap every 32bit pixel, BGRA8 to
   big-endian xRGB; bit 1: source rows are bottom-up; bit 2: convert BGRA8
   to big-endian RGB555, 0RRRRRGGGGGBBBBB, bit 0 then ignored, destination
   rows are source row bytes / 2 and need only 2-byte alignment, and the
-  bounds checks use that size). With destination
-  non-zero and reply expect > 0 the doorbell stores the reply row by row at
+  bounds checks use that size; bit 3: present, i.e. store the reply at the
+  destination instead of the reply area). With bit 3 set and reply expect > 0 the doorbell stores the reply row by row at
   destination + row * pitch and marks it dirty; reply expect must be a
   multiple of the row bytes, the rows 4-byte aligned and the rectangle
   must end below the ring offset, else GL status bit 6 is set and the reply

@@ -99,7 +99,8 @@ enum vga_pci_flags {
  *                          (<= REPLY_SIZE); 0 = no reply. The executor read
  *                          blocks, so the guest must name the exact span.
  *   0x50 REPLY_DEST   rw  VRAM byte offset of a destination rectangle for
- *                          the reply; 0 = the normal reply area
+ *                          the reply (used only with REPLY_FLAGS bit3;
+ *                          0 is a valid offset)
  *   0x54 REPLY_PITCH  rw  bytes per destination row
  *   0x58 REPLY_ROW_BYTES rw payload bytes per source row (width * 4)
  *   0x5c REPLY_FLAGS  rw  bit0: byte-swap each 32-bit pixel (BGRA8 LE source
@@ -119,13 +120,13 @@ enum vga_pci_flags {
  *                          stream). One GL app at a time.
  * RING_HEAD/TAIL are byte indexes; a doorbell handles the wrap.
  *
- * Present (E4): with REPLY_DEST != 0 and REPLY_EXPECT > 0 the doorbell
+ * Present (E4): with REPLY_FLAGS bit3 (PRESENT) and REPLY_EXPECT > 0 the doorbell
  * streams the reply row by row into VRAM + DEST + row * PITCH instead of the
  * reply area (REPLY_LEN then counts payload bytes written). EXPECT must be a
  * multiple of ROW_BYTES; ROW_BYTES must be a multiple of 4 and <= PITCH and
  * <= 64 KiB; the rectangle must end at or below RING_OFFSET. Any violation
  * sets GL_STATUS PVMAC_GL_ERR_DEST, the commands still run, and the reply is
- * read and dropped. The 16-byte DGReply header read needs REPLY_DEST == 0.
+ * read and dropped. The 16-byte DGReply header read needs bit3 clear.
  * The written span is marked dirty so the display refreshes.
  *
  * Threading (E5): a worker thread owns writes to the executor. A doorbell
@@ -149,6 +150,7 @@ enum vga_pci_flags {
 #define PVMAC_REPLY_FLAG_SWAP32 (1u << 0)
 #define PVMAC_REPLY_FLAG_FLIP   (1u << 1)
 #define PVMAC_REPLY_FLAG_RGB555 (1u << 2)
+#define PVMAC_REPLY_FLAG_PRESENT (1u << 3) /* write the reply rows at REPLY_DEST (0 is a valid offset) */
 
 enum {
     PVMAC_REG_ID         = 0x00,
@@ -808,7 +810,7 @@ static void pvmac_gl_doorbell(PCIVGAState *d)
     p->ring_tail = head;
 
     if (ok) {
-        if (p->reply_dest) {
+        if (p->reply_flags & PVMAC_REPLY_FLAG_PRESENT) {
             pvmac_gl_present(d, expect);
         } else {
             ssize_t n = VIMGLInprocessReadExpected(
@@ -1055,7 +1057,8 @@ static void pvmac_write(void *opaque, hwaddr addr, uint64_t val, unsigned size)
     case PVMAC_REG_REPLY_FLAGS:
         d->pvmac.reply_flags = val & (PVMAC_REPLY_FLAG_SWAP32 |
                                       PVMAC_REPLY_FLAG_FLIP |
-                                      PVMAC_REPLY_FLAG_RGB555);
+                                      PVMAC_REPLY_FLAG_RGB555 |
+                                      PVMAC_REPLY_FLAG_PRESENT);
         break;
     case PVMAC_REG_STREAM_RESET:
         pvmac_stream_reset(d);
