@@ -104,7 +104,19 @@ enum vga_pci_flags {
  *   0x58 REPLY_ROW_BYTES rw payload bytes per source row (width * 4)
  *   0x5c REPLY_FLAGS  rw  bit0: byte-swap each 32-bit pixel (BGRA8 LE source
  *                          -> big-endian xRGB, as in the r300 path);
- *                          bit1: source rows are bottom-up (flip vertically)
+ *                          bit1: source rows are bottom-up (flip vertically);
+ *                          bit2: convert each BGRA8 LE pixel to big-endian
+ *                          RGB555 (0RRRRRGGGGGBBBBB); bit0 is then ignored,
+ *                          the destination row is ROW_BYTES / 2 bytes (dest
+ *                          and pitch need only 2-byte alignment) and the
+ *                          bounds checks use that size
+ *   0x60 STREAM_RESET wo  any value: stop the worker, close the executor
+ *                          stream (the host frees that client's contexts),
+ *                          reset ring head/tail, reply state and GL_STATUS.
+ *                          The stream reopens lazily on the next doorbell.
+ *                          A guest GL process writes it before its first
+ *                          DG_HELLO (the host rejects a second HELLO on one
+ *                          stream). One GL app at a time.
  * RING_HEAD/TAIL are byte indexes; a doorbell handles the wrap.
  *
  * Present (E4): with REPLY_DEST != 0 and REPLY_EXPECT > 0 the doorbell
@@ -136,6 +148,7 @@ enum vga_pci_flags {
 #define PVMAC_GL_QUEUE_MAX      (32 * MiB)  /* backpressure on the vCPU */
 #define PVMAC_REPLY_FLAG_SWAP32 (1u << 0)
 #define PVMAC_REPLY_FLAG_FLIP   (1u << 1)
+#define PVMAC_REPLY_FLAG_RGB555 (1u << 2)
 
 enum {
     PVMAC_REG_ID         = 0x00,
@@ -162,6 +175,7 @@ enum {
     PVMAC_REG_REPLY_PITCH   = 0x54,
     PVMAC_REG_REPLY_ROW_BYTES = 0x58,
     PVMAC_REG_REPLY_FLAGS   = 0x5c,
+    PVMAC_REG_STREAM_RESET  = 0x60,
 };
 
 #define PVMAC_GL_ERR_BAD_HEAD   (1u << 0)
@@ -648,17 +662,20 @@ static bool pvmac_present_valid(PCIVGAState *d, uint32_t expect,
 {
     PVMACState *p = &d->pvmac;
     uint64_t limit = pvmac_ring_offset(d);
+    bool rgb555 = p->reply_flags & PVMAC_REPLY_FLAG_RGB555;
+    uint32_t align = rgb555 ? 1 : 3;
+    uint32_t dst_rb = rgb555 ? p->reply_row_bytes / 2 : p->reply_row_bytes;
     uint64_t end;
 
     if (!p->reply_row_bytes || p->reply_row_bytes > PVMAC_GL_MAX_ROW_BYTES ||
-        (p->reply_row_bytes & 3) || p->reply_pitch < p->reply_row_bytes ||
-        (p->reply_dest & 3) || (p->reply_pitch & 3) ||
+        (p->reply_row_bytes & 3) || p->reply_pitch < dst_rb ||
+        (p->reply_dest & align) || (p->reply_pitch & align) ||
         expect % p->reply_row_bytes) {
         return false;
     }
     *rows = expect / p->reply_row_bytes;
     end = (uint64_t)p->reply_dest +
-          (uint64_t)(*rows - 1) * p->reply_pitch + p->reply_row_bytes;
+          (uint64_t)(*rows - 1) * p->reply_pitch + dst_rb;
     return end <= limit;
 }
 
@@ -671,6 +688,8 @@ static void pvmac_gl_present(PCIVGAState *d, uint32_t expect)
     uint8_t *tmp;
     bool valid = pvmac_present_valid(d, expect, &rows);
     uint32_t done = 0;
+    bool rgb555 = p->reply_flags & PVMAC_REPLY_FLAG_RGB555;
+    uint32_t dst_rb = rgb555 ? rb / 2 : rb;
 
     trace_vga_pvmac_gl_present(p->reply_dest, p->reply_pitch, rb, rows,
                                p->reply_flags, valid);
@@ -694,7 +713,18 @@ static void pvmac_gl_present(PCIVGAState *d, uint32_t expect)
             p->gl_status |= PVMAC_GL_ERR_REPLY;
             break;
         }
-        if (p->reply_flags & PVMAC_REPLY_FLAG_SWAP32) {
+        if (rgb555) {
+            const uint32_t *s32 = (const uint32_t *)tmp;
+            uint32_t i;
+
+            for (i = 0; i < rb / 4; i++) {
+                uint32_t px = le32_to_cpu(s32[i]);   /* 0xAARRGGBB */
+                uint16_t v = ((px >> 9) & 0x7c00) | ((px >> 6) & 0x03e0) |
+                             ((px >> 3) & 0x001f);
+
+                stw_be_p(dst + i * 2, v);
+            }
+        } else if (p->reply_flags & PVMAC_REPLY_FLAG_SWAP32) {
             uint32_t *s32 = (uint32_t *)tmp;   /* g_malloc: aligned */
             uint32_t *d32 = (uint32_t *)dst;   /* dest and pitch are 4-aligned */
             uint32_t i;
@@ -710,7 +740,7 @@ static void pvmac_gl_present(PCIVGAState *d, uint32_t expect)
     g_free(tmp);
     p->reply_len = done;
     memory_region_set_dirty(&d->vga.vram, p->reply_dest,
-                            (uint64_t)(rows - 1) * p->reply_pitch + rb);
+                            (uint64_t)(rows - 1) * p->reply_pitch + dst_rb);
 }
 
 static void pvmac_gl_doorbell(PCIVGAState *d)
@@ -841,6 +871,24 @@ static void pvmac_gl_probe(PCIVGAState *d)
     warn_report("vga: mac-accel GL stream needs macOS; disabled");
 }
 #endif
+
+/* STREAM_RESET: drop the executor stream and the ring/reply state. */
+static void pvmac_stream_reset(PCIVGAState *d)
+{
+    PVMACState *p = &d->pvmac;
+
+    trace_vga_pvmac_stream_reset();
+    pvmac_gl_flush(d);
+    pvmac_gl_close(d);
+    p->ring_head = p->ring_tail = 0;
+    p->reply_len = 0;
+    p->reply_expect = 0;
+    p->reply_dest = 0;
+    p->reply_pitch = 0;
+    p->reply_row_bytes = 0;
+    p->reply_flags = 0;
+    p->gl_status = 0;
+}
 
 static void pvmac_error(PCIVGAState *d, uint32_t code)
 {
@@ -1006,7 +1054,11 @@ static void pvmac_write(void *opaque, hwaddr addr, uint64_t val, unsigned size)
         break;
     case PVMAC_REG_REPLY_FLAGS:
         d->pvmac.reply_flags = val & (PVMAC_REPLY_FLAG_SWAP32 |
-                                      PVMAC_REPLY_FLAG_FLIP);
+                                      PVMAC_REPLY_FLAG_FLIP |
+                                      PVMAC_REPLY_FLAG_RGB555);
+        break;
+    case PVMAC_REG_STREAM_RESET:
+        pvmac_stream_reset(d);
         break;
     case PVMAC_REG_DOORBELL:
         pvmac_gl_doorbell(d);

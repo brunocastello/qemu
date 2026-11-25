@@ -141,9 +141,19 @@ Likewise applies to the pci variant only for obvious reasons.
   Present destination (version 2). Reply destination offset (VRAM byte
   offset, 0 = reply area), destination pitch (bytes per row), source row
   bytes (width * 4), flags (bit 0: byte-swap every 32bit pixel, BGRA8 to
-  big-endian xRGB; bit 1: source rows are bottom-up). With destination
+  big-endian xRGB; bit 1: source rows are bottom-up; bit 2: convert BGRA8
+  to big-endian RGB555, 0RRRRRGGGGGBBBBB, bit 0 then ignored, destination
+  rows are source row bytes / 2 and need only 2-byte alignment, and the
+  bounds checks use that size). With destination
   non-zero and reply expect > 0 the doorbell stores the reply row by row at
   destination + row * pitch and marks it dirty; reply expect must be a
   multiple of the row bytes, the rows 4-byte aligned and the rectangle
   must end below the ring offset, else GL status bit 6 is set and the reply
   is dropped. The 16 byte reply header read must use destination 0.
+``0860``
+  Stream reset (version 2, write only). Any value stops the host worker,
+  closes the executor stream (the host frees that client's contexts),
+  resets the ring head and tail, the reply registers and GL status. The
+  stream reopens on the next doorbell. A guest GL process writes it before
+  its first DG_HELLO, because the host rejects a second HELLO on one
+  stream; only one GL application can run at a time.
