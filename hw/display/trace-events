@@ -156,6 +156,7 @@ sii9022_switch_mode(const char *mode) "mode: %s"
 ati_mm_read(unsigned int size, uint64_t addr, const char *name, uint64_t val) "%u 0x%"PRIx64 " %s -> 0x%"PRIx64
 ati_mm_write(unsigned int size, uint64_t addr, const char *name, uint64_t val) "%u 0x%"PRIx64 " %s <- 0x%"PRIx64
 ati_scanout_mode(int w, int h, int bpp, int stride, uint32_t offs, bool be, uint32_t gen_cntl, uint32_t pitch, uint32_t cnfg, uint32_t surf) "%dx%d bpp %d stride %d offs 0x%x big-endian %d crtc_gen_cntl 0x%08x crtc_pitch 0x%08x cnfg_cntl 0x%08x surface_cntl 0x%08x"
+ati_display_surface(int w, int h, int stride, uint32_t pixman_fmt, bool alloc, int vga_bpp, uint32_t line_offset, uint32_t start_addr, bool be, int last_depth, uint16_t vbe_enable, uint64_t vram_start, uint64_t vram_line240) "surface %dx%d stride %d pixman 0x%08x allocated %d | vga bpp %d line_offset %u start_addr 0x%x be %d last_depth %d vbe_enable 0x%x | vram[start] 0x%016"PRIx64" vram[line240] 0x%016"PRIx64
 ati_3d_readback(int async, uint32_t mc, unsigned w, unsigned h, unsigned pitch, unsigned fmt, unsigned swap) "async %d mc 0x%08x %ux%u pitch %u fmt %u swap %u"
 ati_3d_mode_drop(int n) "dropped %d tracked render targets"
 ati_pll_read(int idx, uint32_t val) "pll[0x%02x] -> 0x%08x"

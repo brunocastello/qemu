@@ -218,6 +218,33 @@ static void ati_vga_gfx_update(void *opaque)
         s->vga.last_width = -1;
     }
     ati_base_ops->gfx_update(opaque);
+    if (trace_event_get_state_backends(TRACE_ATI_DISPLAY_SURFACE) &&
+        s->mode == EXT_MODE) {
+        /* what the display actually presented, once a second */
+        int64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+
+        if (now - s->dbg_surface_ns >= NANOSECONDS_PER_SECOND) {
+            DisplaySurface *ds = qemu_console_surface(vga->con);
+            uint64_t base = (uint64_t)vga->params.start_addr * 4;
+            uint64_t l240 = base + (uint64_t)vga->params.line_offset * 240;
+            uint64_t v0 = 0, v1 = 0;
+
+            s->dbg_surface_ns = now;
+            if (l240 + 8 <= vga->vram_size) {
+                v0 = ldq_be_p(vga->vram_ptr + base);
+                v1 = ldq_be_p(vga->vram_ptr + l240);
+            }
+            trace_ati_display_surface(surface_width(ds), surface_height(ds),
+                                      surface_stride(ds), ds->format,
+                                      surface_is_allocated(ds),
+                                      vga->get_bpp(vga),
+                                      vga->params.line_offset,
+                                      vga->params.start_addr,
+                                      vga->big_endian_fb, vga->last_depth,
+                                      vga->vbe_regs[VBE_DISPI_INDEX_ENABLE],
+                                      v0, v1);
+        }
+    }
 }
 
 /* Used by host side hardware cursor */
