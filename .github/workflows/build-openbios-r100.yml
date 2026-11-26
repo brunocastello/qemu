@@ -1,6 +1,6 @@
 name: Build OpenBIOS for ati-vga,model=r100
 # OpenBIOS e1e703ac ("macio: add awacs/screamer device", the Screamer-aware tree
-# our pc-bios/openbios-ppc comes from) + ClassicMac/RetroBoot's openbios-ati-radeon.patch,
+# our pc-bios/openbios-ppc comes from) + ClassicMac/RetroBoot's openbios-ati-radeon.diff,
 # built in the openbios-builder image the way ClassicMac's scripts/build-openbios.sh does.
 # Variants: base (unpatched, to compare with pc-bios/openbios-ppc), r100 (what we ship),
 # r100-cm8 (r100 + ClassicMac's Mac OS 8/9 profile patch; evaluation only).
@@ -48,8 +48,8 @@ jobs:
             cp /tmp/src-$name/obj-ppc/openbios-qemu.elf out/openbios-ppc-$name
           }
           build base
-          build r100 $PATCHES/openbios-ati-radeon.patch
-          build r100-cm8 $PATCHES/openbios-classic-macos-8.patch $PATCHES/openbios-ati-radeon.patch
+          build r100 $PATCHES/openbios-ati-radeon.diff
+          build r100-cm8 $PATCHES/openbios-classic-macos-8.diff $PATCHES/openbios-ati-radeon.diff
           strings out/openbios-ppc-r100 | grep -q 'ATY,Rage6p'
           strings out/openbios-ppc-r100 | grep -q screamer
           ! strings out/openbios-ppc-base | grep -q 'ATY,Rage6p'
