@@ -39,3 +39,18 @@ upstream versions of `ati.c`, `ati_2d.c`, `ati_int.h`, `ati_regs.h` and
 
 Run-time switches: `CLASSICMAC_ATI_3D=off` (or `RETROBOOT_ATI_3D=off`) turns the
 3D engine off; QOM `x-accel-stats` and `x-gl-renderer` report status.
+
+## Firmware
+
+`pc-bios/openbios-ppc-r100`: OpenBIOS `e1e703ac0ad615ab0d7edea54db600aaa629bf07`
++ `roms/openbios-ati-r100/openbios-ati-radeon.diff` (ClassicMac
+`ati/openbios-ati-radeon.patch`, RetroBoot `emulator/openbios/retroboot-ati-radeon.patch`,
+SHA-256 `c6282bb965fdb742d9a5c25bfdacd2aa7c3a1b460971b99b5d64866996bd0a88`),
+built by `.github/workflows/build-openbios-r100.yml`. ClassicMac's own Mac OS 8/9
+profile patch is kept next to it (`openbios-classic-macos-8.diff`) and built as
+the evaluation-only variant `r100-cm8`; it is not shipped.
+
+Command line (mac99, Mac OS 9):
+
+    qemu-system-ppc -M mac99,via=cuda -cpu 7400 -m 512 -bios openbios-ppc-r100 \
+      -vga none -device ati-vga,id=ati0,model=r100,vgamem_mb=32,romfile=,guest_hwcursor=on,xres=1024,yres=768,refresh_rate=60000

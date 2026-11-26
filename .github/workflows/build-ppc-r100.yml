@@ -49,12 +49,12 @@ jobs:
                    printf '{"execute":"qom-get","arguments":{"path":"/machine/peripheral/ati0","property":"x-gl-renderer"}}\n'; sleep 1
                    printf '{"execute":"qom-get","arguments":{"path":"/machine/peripheral/ati0","property":"x-accel-stats"}}\n'; sleep 1
                    printf '{"execute":"quit"}\n'; sleep 1 ) | \
-                 timeout 60 $Q -vga none -device ati-vga,id=ati0,model=r100,vgamem_mb=32,romfile=,guest_hwcursor=on 2>&1 || true )
+                 perl -e 'alarm 60; exec @ARGV' $Q -vga none -device ati-vga,id=ati0,model=r100,vgamem_mb=32,romfile=,guest_hwcursor=on 2>&1 || true )
           echo "$out"
           echo "$out" | grep -q '"return": "ops2d=' || { echo "R100 did not realize"; exit 1; }
           out=$( ( printf '{"execute":"qmp_capabilities"}\n'; sleep 1
                    printf '{"execute":"query-status"}\n'; sleep 1
-                   printf '{"execute":"quit"}\n'; sleep 1 ) | timeout 60 $Q 2>&1 || true )
+                   printf '{"execute":"quit"}\n'; sleep 1 ) | perl -e 'alarm 60; exec @ARGV' $Q 2>&1 || true )
           echo "$out"
           echo "$out" | grep -q '"status": "prelaunch"' || { echo "plain mac99 failed"; exit 1; }
       - uses: actions/upload-artifact@v4
