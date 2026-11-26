@@ -302,6 +302,8 @@ static void track_readback(ATIVGAState *s, ATITrack *k)
         return;
     }
     track_drop_pending(s, k);
+    trace_ati_3d_readback(0, k->img.mc, k->img.w, k->img.h, k->img.pitch,
+                          k->img.fmt, k->img.swap);
     if (ati_mc_translate(s, k->img.mc, &off, &contig) == ATI_MC_VRAM &&
         off + len <= s->vga.vram_size) {
         /*
@@ -370,6 +372,8 @@ static void scanout_read_async(ATIVGAState *s, uint64_t mc, uint64_t len)
         track_land(s, k);
         if (k->gl_owned && mc < b && mc + len > a && !k->pending &&
             k->gen != k->read_gen) {
+            trace_ati_3d_readback(1, k->img.mc, k->img.w, k->img.h,
+                                  k->img.pitch, k->img.fmt, k->img.swap);
             k->pending = ati_glr_target_read_async(t->r, &k->img);
             k->read_gen = k->gen;
             t->rb_why[ATI_SYNC_VBLANK]++;
@@ -406,6 +410,33 @@ bool ati_3d_flip(ATIVGAState *s, uint64_t mc, uint64_t len)
     scanout_read_async(s, mc, len);
     t->flips++;
     return !ati_3d_range_ready(s, mc, len);
+}
+
+/*
+ * The scanout's depth or geometry changed: the render targets tracked so far
+ * belong to the old mode's buffers.  They must not be read back over the new
+ * framebuffer (a stale 32 bpp desktop target landing in a 15 bpp one shows as
+ * squeezed, line-doubled garbage), so drop them, in-flight reads included.
+ */
+void ati_3d_mode_changed(ATIVGAState *s)
+{
+    ATI3DState *t = s->r3d;
+    int n = 0;
+
+    for (int i = 0; t && t->r && i < MAX_TRACK; i++) {
+        ATITrack *k = &t->track[i];
+
+        if (k->pending) {
+            ati_glr_read_wait(t->r, k->pending);
+            ati_glr_read_free(k->pending);
+            k->pending = NULL;
+        }
+        if (k->img.w) {
+            n++;
+        }
+        memset(k, 0, sizeof(*k));
+    }
+    trace_ati_3d_mode_drop(n);
 }
 
 /* finished asynchronous readbacks into VRAM */

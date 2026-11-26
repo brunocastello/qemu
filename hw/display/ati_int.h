@@ -161,6 +161,7 @@ struct ATIVGAState {
     char *model;
     uint16_t dev_id;
     uint8_t mode;
+    uint32_t scan_bpp, scan_stride, scan_h, scan_w;   /* applied scanout */
     uint64_t mode_sig;           /* ati_mode_signature() of the applied mode */
     uint8_t use_pixman;
     bool cursor_guest_mode;
@@ -220,6 +221,7 @@ void ati_3d_sync_range(ATIVGAState *s, uint64_t mc, uint64_t len);
 bool ati_3d_flip(ATIVGAState *s, uint64_t mc, uint64_t len);
 bool ati_3d_range_ready(ATIVGAState *s, uint64_t mc, uint64_t len);
 void ati_3d_land(ATIVGAState *s);
+void ati_3d_mode_changed(ATIVGAState *s);
 /* the vCPU waits for the render thread with the BQL released */
 bool ati_3d_busy(ATIVGAState *s);
 /* the 2D engine wrote VRAM [off, off + len) (VRAM offsets) */

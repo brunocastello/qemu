@@ -149,6 +149,17 @@ static void ati_vga_switch_mode(ATIVGAState *s)
             s->vga.big_endian_fb =
                 (s->regs.config_cntl & (APER_0_ENDIAN | APER_1_ENDIAN)) ||
                 (s->regfile[SURFACE_CNTL / 4] & ATI_SURF_AP_SWAP_MASK);
+            if (s->scan_bpp != bpp || s->scan_stride != stride ||
+                s->scan_w != h || s->scan_h != v) {
+                /* in-flight/tracked 3D targets belong to the old mode */
+                s->scan_bpp = bpp;
+                s->scan_stride = stride;
+                s->scan_w = h;
+                s->scan_h = v;
+                if (ati_is_radeon(s)) {
+                    ati_3d_mode_changed(s);
+                }
+            }
             trace_ati_scanout_mode(h, v, bpp, stride, offs,
                                    s->vga.big_endian_fb,
                                    s->regs.crtc_gen_cntl, s->regs.crtc_pitch,
