@@ -1,0 +1,63 @@
+name: Build qemu-system-ppc with the R100 (macOS arm64, self-contained)
+on:
+  workflow_dispatch:
+    inputs:
+      runner: { description: 'runner label', default: 'macos-15' }
+  push:
+    branches: [os9-r100]
+    paths-ignore:
+      - 'roms/openbios-ati-r100/**'
+      - '.github/workflows/build-openbios-r100.yml'
+jobs:
+  build:
+    runs-on: ${{ inputs.runner || 'macos-15' }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 1 }
+      - name: Dependencies
+        run: |
+          brew install ninja pkgconf glib pixman libslirp shaderc spirv-cross glslang vulkan-headers vulkan-loader molten-vk dylibbundler spice-protocol spice-server
+          python3 -m venv /tmp/venv && /tmp/venv/bin/pip install -q distlib tomli
+      - name: Configure and build
+        run: |
+          mkdir build && cd build
+          ../configure --python=/tmp/venv/bin/python3 --target-list=ppc-softmmu \
+            --disable-docs --disable-sdl --disable-werror -Doptimization=2 --enable-spice --disable-dbus-display --disable-opengl
+          ninja qemu-system-ppc qemu-img
+      - name: Bundle Homebrew dylibs next to the binary
+        run: |
+          mkdir -p dist/lib
+          cp build/qemu-system-ppc build/qemu-img dist/
+          dylibbundler -of -b -x dist/qemu-system-ppc -x dist/qemu-img -d dist/lib -p @executable_path/lib/
+          # dylibbundler adds @executable_path/lib/ once per bundled dylib; dyld refuses duplicates
+          for f in dist/qemu-system-ppc dist/qemu-img dist/lib/*.dylib; do
+            while [ "$(otool -l "$f" | grep -c 'path @executable_path/lib/')" -gt 1 ]; do
+              install_name_tool -delete_rpath @executable_path/lib/ "$f"; done; done
+          # MoltenVK ICD is loaded at runtime by the Vulkan loader; ship it too
+          cp "$(brew --prefix molten-vk)/lib/libMoltenVK.dylib" dist/lib/ || true
+          cp -R pc-bios dist/pc-bios
+          for f in dist/qemu-system-ppc dist/qemu-img dist/lib/*.dylib; do codesign -f -s - "$f"; done
+          otool -L dist/qemu-system-ppc | grep -v -E "@executable_path|/usr/lib|/System" && echo "UNBUNDLED DEPS ABOVE" || echo "all deps bundled"
+          tar -czf qemu-ppc-r100-macos-arm64.tgz -C dist .
+      - name: Smoke test (realize the R100, read host GL status, plain mac99 still starts)
+        run: |
+          set -x
+          # the card must not add a link-time OpenGL dependency
+          otool -L dist/qemu-system-ppc | grep -i "OpenGL.framework" && { echo "OpenGL linked"; exit 1; } || true
+          Q="dist/qemu-system-ppc -L dist/pc-bios -M mac99,via=cuda -cpu 7400 -m 256 -display none -monitor none -serial none -nic none -S -qmp stdio"
+          out=$( ( printf '{"execute":"qmp_capabilities"}\n'; sleep 1
+                   printf '{"execute":"qom-get","arguments":{"path":"/machine/peripheral/ati0","property":"x-gl-renderer"}}\n'; sleep 1
+                   printf '{"execute":"qom-get","arguments":{"path":"/machine/peripheral/ati0","property":"x-accel-stats"}}\n'; sleep 1
+                   printf '{"execute":"quit"}\n'; sleep 1 ) | \
+                 timeout 60 $Q -vga none -device ati-vga,id=ati0,model=r100,vgamem_mb=32,romfile=,guest_hwcursor=on 2>&1 || true )
+          echo "$out"
+          echo "$out" | grep -q '"return": "ops2d=' || { echo "R100 did not realize"; exit 1; }
+          out=$( ( printf '{"execute":"qmp_capabilities"}\n'; sleep 1
+                   printf '{"execute":"query-status"}\n'; sleep 1
+                   printf '{"execute":"quit"}\n'; sleep 1 ) | timeout 60 $Q 2>&1 || true )
+          echo "$out"
+          echo "$out" | grep -q '"status": "prelaunch"' || { echo "plain mac99 failed"; exit 1; }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: qemu-ppc-r100-macos-arm64
+          path: qemu-ppc-r100-macos-arm64.tgz

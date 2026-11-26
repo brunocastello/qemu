@@ -1,0 +1,60 @@
+name: Build OpenBIOS for ati-vga,model=r100
+# OpenBIOS e1e703ac ("macio: add awacs/screamer device", the Screamer-aware tree
+# our pc-bios/openbios-ppc comes from) + ClassicMac/RetroBoot's openbios-ati-radeon.patch,
+# built in the openbios-builder image the way ClassicMac's scripts/build-openbios.sh does.
+# Variants: base (unpatched, to compare with pc-bios/openbios-ppc), r100 (what we ship),
+# r100-cm8 (r100 + ClassicMac's Mac OS 8/9 profile patch; evaluation only).
+on:
+  workflow_dispatch:
+  push:
+    branches: [os9-r100]
+    paths:
+      - 'roms/openbios-ati-r100/**'
+      - '.github/workflows/build-openbios-r100.yml'
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 1 }
+      - name: Fetch OpenBIOS
+        run: |
+          git clone --no-checkout https://github.com/openbios/openbios.git /tmp/openbios
+          git -C /tmp/openbios fetch origin e1e703ac0ad615ab0d7edea54db600aaa629bf07
+          git -C /tmp/openbios checkout --detach FETCH_HEAD
+      - name: Build variants
+        run: |
+          set -euo pipefail
+          IMAGE=ghcr.io/openbios/openbios-builder@sha256:bf806644ccff091323dd56a853866ba09301b1a7fcb91e865fdb289499ef8b38
+          PATCHES=$PWD/roms/openbios-ati-r100
+          mkdir -p out /tmp/shim
+          # reproducible banner date
+          cat > /tmp/shim/date <<'SH'
+          #!/bin/sh
+          if [ "$*" = "+%b %e %Y %H:%M" ]; then echo "Nov 26 2026 00:00"; exit 0; fi
+          exec /bin/date "$@"
+          SH
+          chmod 755 /tmp/shim/date
+          build() {
+            name=$1; shift
+            rm -rf /tmp/src-$name
+            git -C /tmp/openbios worktree add --detach /tmp/src-$name HEAD >/dev/null
+            for p in "$@"; do git -C /tmp/src-$name apply "$p"; done
+            docker run --rm --platform linux/amd64 \
+              -e "EXTRACFLAGS=-Wno-array-bounds -Wno-address-of-packed-member" \
+              -e "PATH=/shim:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+              -v /tmp/shim:/shim:ro -v /tmp/src-$name:/src -w /src "$IMAGE" \
+              sh -c 'config/scripts/switch-arch ppc >/dev/null && make -j2'
+            cp /tmp/src-$name/obj-ppc/openbios-qemu.elf out/openbios-ppc-$name
+          }
+          build base
+          build r100 $PATCHES/openbios-ati-radeon.patch
+          build r100-cm8 $PATCHES/openbios-classic-macos-8.patch $PATCHES/openbios-ati-radeon.patch
+          strings out/openbios-ppc-r100 | grep -q 'ATY,Rage6p'
+          strings out/openbios-ppc-r100 | grep -q screamer
+          ! strings out/openbios-ppc-base | grep -q 'ATY,Rage6p'
+          ls -l out; file out/*; sha256sum out/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: openbios-ppc-r100
+          path: out/
