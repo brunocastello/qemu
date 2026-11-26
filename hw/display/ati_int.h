@@ -161,6 +161,7 @@ struct ATIVGAState {
     char *model;
     uint16_t dev_id;
     uint8_t mode;
+    uint64_t mode_sig;           /* ati_mode_signature() of the applied mode */
     uint8_t use_pixman;
     bool cursor_guest_mode;
     bool flip_pending;          /* RetroBoot: display start waits for a readback */

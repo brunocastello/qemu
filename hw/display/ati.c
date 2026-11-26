@@ -69,8 +69,37 @@ static void ati_vga_set_offset(VGACommonState *vga, uint32_t offs)
     vga->vbe_start_addr = offs / 4;
 }
 
+#ifndef SURFACE_CNTL
+#define SURFACE_CNTL            0x0b00
+#endif
+/* SURFACE_CNTL non-surface aperture swap bits: aperture 0 and 1 */
+#define ATI_SURF_AP_SWAP_MASK   0x00f00000
+
+/*
+ * RetroBoot: everything the scanout format depends on.  The guest programs
+ * these registers in any order, and some (CNFG_CNTL, SURFACE_CNTL, the
+ * display size while the CRTC is off) used to be missed, leaving the old
+ * mode's format in use; the display update compares this and re-applies.
+ */
+static uint64_t ati_mode_signature(ATIVGAState *s)
+{
+    uint64_t sig;
+
+    sig = s->regs.crtc_gen_cntl & (CRTC2_EXT_DISP_EN | CRTC2_EN |
+                                   CRTC_PIX_WIDTH_MASK);
+    sig = sig * 0x100000001b3ULL + (s->regs.crtc_h_total_disp >> 16);
+    sig = sig * 0x100000001b3ULL + (s->regs.crtc_v_total_disp >> 16);
+    sig = sig * 0x100000001b3ULL + (s->regs.crtc_pitch & 0x7ff);
+    sig = sig * 0x100000001b3ULL + (s->regs.config_cntl &
+                                    (APER_0_ENDIAN | APER_1_ENDIAN));
+    sig = sig * 0x100000001b3ULL + (s->regfile[SURFACE_CNTL / 4] &
+                                    ATI_SURF_AP_SWAP_MASK);
+    return sig;
+}
+
 static void ati_vga_switch_mode(ATIVGAState *s)
 {
+    s->mode_sig = ati_mode_signature(s);
     s->flip_pending = false;     /* RetroBoot: a new mode shows its own start */
     DPRINTF("%d -> %d\n",
             s->mode, !!(s->regs.crtc_gen_cntl & CRTC2_EXT_DISP_EN));
@@ -117,11 +146,16 @@ static void ati_vga_switch_mode(ATIVGAState *s)
                 return;
             }
             DPRINTF("Switching to %dx%d %d %d @ %x\n", h, v, stride, bpp, offs);
+            s->vga.big_endian_fb =
+                (s->regs.config_cntl & (APER_0_ENDIAN | APER_1_ENDIAN)) ||
+                (s->regfile[SURFACE_CNTL / 4] & ATI_SURF_AP_SWAP_MASK);
+            trace_ati_scanout_mode(h, v, bpp, stride, offs,
+                                   s->vga.big_endian_fb,
+                                   s->regs.crtc_gen_cntl, s->regs.crtc_pitch,
+                                   s->regs.config_cntl,
+                                   s->regfile[SURFACE_CNTL / 4]);
             vbe_ioport_write_index(&s->vga, 0, VBE_DISPI_INDEX_ENABLE);
             vbe_ioport_write_data(&s->vga, 0, VBE_DISPI_DISABLED);
-            s->vga.big_endian_fb = (s->regs.config_cntl & APER_0_ENDIAN ||
-                                    s->regs.config_cntl & APER_1_ENDIAN ?
-                                    true : false);
             /* reset VBE regs then set up mode */
             s->vga.vbe_regs[VBE_DISPI_INDEX_XRES] = h;
             s->vga.vbe_regs[VBE_DISPI_INDEX_YRES] = v;
@@ -144,6 +178,24 @@ static void ati_vga_switch_mode(ATIVGAState *s)
         vbe_ioport_write_index(&s->vga, 0, VBE_DISPI_INDEX_ENABLE);
         vbe_ioport_write_data(&s->vga, 0, VBE_DISPI_DISABLED);
     }
+}
+
+/*
+ * Display update: re-apply the mode when a register it depends on changed
+ * without ati_vga_switch_mode noticing (see ati_mode_signature).
+ */
+static const GraphicHwOps *ati_base_ops;
+static GraphicHwOps ati_vga_hw_ops;
+
+static void ati_vga_gfx_update(void *opaque)
+{
+    VGACommonState *vga = opaque;
+    ATIVGAState *s = container_of(vga, ATIVGAState, vga);
+
+    if (s->mode == EXT_MODE && s->mode_sig != ati_mode_signature(s)) {
+        ati_vga_switch_mode(s);
+    }
+    ati_base_ops->gfx_update(opaque);
 }
 
 /* Used by host side hardware cursor */
@@ -1422,6 +1474,10 @@ static void ati_vga_realize(PCIDevice *dev, Error **errp)
     }
     vga_init(vga, OBJECT(s), pci_address_space(dev),
              pci_address_space_io(dev), true);
+    ati_base_ops = s->vga.hw_ops;
+    ati_vga_hw_ops = *ati_base_ops;
+    ati_vga_hw_ops.gfx_update = ati_vga_gfx_update;
+    s->vga.hw_ops = &ati_vga_hw_ops;
     vga->con = graphic_console_init(DEVICE(s), 0, s->vga.hw_ops, vga);
     if (s->cursor_guest_mode) {
         vga->cursor_invalidate = ati_cursor_invalidate;
