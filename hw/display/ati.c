@@ -235,7 +235,8 @@ static void ati_vga_gfx_update(void *opaque)
                 v1 = ldq_be_p(vga->vram_ptr + l240);
             }
             trace_ati_display_surface(surface_width(ds), surface_height(ds),
-                                      surface_stride(ds), ds->format,
+                                      surface_stride(ds),
+                                      pixman_image_get_format(ds->image),
                                       surface_is_allocated(ds));
             trace_ati_display_vga(vga->get_bpp(vga), vga->params.line_offset,
                                   vga->params.start_addr, vga->big_endian_fb,
