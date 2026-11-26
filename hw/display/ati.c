@@ -206,6 +206,17 @@ static void ati_vga_gfx_update(void *opaque)
     if (s->mode == EXT_MODE && s->mode_sig != ati_mode_signature(s)) {
         ati_vga_switch_mode(s);
     }
+    if (ati_is_radeon(s) && s->mode == EXT_MODE && s->scan_bpp &&
+        s->scan_bpp < 32) {
+        /*
+         * 8/15/16 bpp is converted into a shadow surface, which redraws only
+         * the pages the VGA dirty log reports.  Render-target readbacks and
+         * 2D/3D writes do not reach it reliably (the shared 32 bpp surface
+         * never needed it), and the display stayed frozen.  The frame is
+         * small at these depths: redraw all of it.
+         */
+        s->vga.last_width = -1;
+    }
     ati_base_ops->gfx_update(opaque);
 }
 
