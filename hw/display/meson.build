@@ -65,7 +65,7 @@ system_ss.add(when: 'CONFIG_XLNX_DISPLAYPORT', if_true: files('xlnx_dp.c'))
 
 system_ss.add(when: 'CONFIG_ARTIST', if_true: files('artist.c'))
 
-system_ss.add(when: 'CONFIG_ATI_VGA', if_true: [files('ati.c', 'ati_2d.c', 'ati_dbg.c'), pixman])
+system_ss.add(when: 'CONFIG_ATI_VGA', if_true: [files('ati.c', 'ati_2d.c', 'ati_dbg.c', 'ati_cp.c', 'ati_3d.c', 'ati_glr.c', 'ati_gl.c'), pixman])
 
 # The R300 fragment programs are generated as GLSL and compiled at run time
 # with shaderc (GLSL -> SPIR-V); SPIRV-Cross turns SPIR-V into MSL for the
