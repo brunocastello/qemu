@@ -50,6 +50,7 @@ blobs = [
   'openbios-ppc-r300',
   'openbios-ppc-rv250',
   'openbios-ppc-r100',
+  'openbios-ppc-r100-retail',
   'QEMU,tcx.bin',
   'QEMU,cgthree.bin',
   'pxe-e1000.rom',

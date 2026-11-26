@@ -7,7 +7,7 @@ index 6880edc..c354dc6 100644
  
      set_property(ph, "device_type", "display", 8);
 +
-+    /* retail Radeon Mac Edition ROM properties (see roms/openbios-ati-r100/README) */
++    /* retail Radeon Mac Edition ROM properties */
 +    set_int_property(ph, "ATY,Flags", 0x1c4);
 +    set_int_property(ph, "ATY,RefCLK", 27000);   /* kHz */
 +    set_int_property(ph, "ATY,MCLK", 183000);

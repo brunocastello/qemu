@@ -3,7 +3,7 @@ name: Build OpenBIOS for ati-vga,model=r100
 # our pc-bios/openbios-ppc comes from) + ClassicMac/RetroBoot's openbios-ati-radeon.diff,
 # built in the openbios-builder image the way ClassicMac's scripts/build-openbios.sh does.
 # Variants: base (unpatched, to compare with pc-bios/openbios-ppc), r100 (what we ship),
-# r100-cm8 (r100 + ClassicMac's Mac OS 8/9 profile patch; evaluation only).
+# r100-retail (r100 + node named ATY,RADEONp with retail ATY,* properties), r100-cm8 (r100 + ClassicMac's Mac OS 8/9 profile patch; evaluation only).
 on:
   workflow_dispatch:
   push:
@@ -49,9 +49,12 @@ jobs:
           }
           build base
           build r100 $PATCHES/openbios-ati-radeon.diff
+          build r100-retail $PATCHES/openbios-ati-radeon.diff $PATCHES/openbios-ati-radeon-retail.diff
           build r100-cm8 $PATCHES/openbios-classic-macos-8.diff $PATCHES/openbios-ati-radeon.diff
           strings out/openbios-ppc-r100 | grep -q 'ATY,Rage6p'
           strings out/openbios-ppc-r100 | grep -q screamer
+          strings out/openbios-ppc-r100-retail | grep -q 'ATY,RADEONp'
+          ! strings out/openbios-ppc-r100-retail | grep -q 'ATY,Rage6p'
           ! strings out/openbios-ppc-base | grep -q 'ATY,Rage6p'
           ls -l out; file out/*; sha256sum out/*
       - uses: actions/upload-artifact@v4
