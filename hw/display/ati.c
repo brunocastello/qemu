@@ -236,13 +236,12 @@ static void ati_vga_gfx_update(void *opaque)
             }
             trace_ati_display_surface(surface_width(ds), surface_height(ds),
                                       surface_stride(ds), ds->format,
-                                      surface_is_allocated(ds),
-                                      vga->get_bpp(vga),
-                                      vga->params.line_offset,
-                                      vga->params.start_addr,
-                                      vga->big_endian_fb, vga->last_depth,
-                                      vga->vbe_regs[VBE_DISPI_INDEX_ENABLE],
-                                      v0, v1);
+                                      surface_is_allocated(ds));
+            trace_ati_display_vga(vga->get_bpp(vga), vga->params.line_offset,
+                                  vga->params.start_addr, vga->big_endian_fb,
+                                  vga->last_depth,
+                                  vga->vbe_regs[VBE_DISPI_INDEX_ENABLE]);
+            trace_ati_display_vram(v0, v1);
         }
     }
 }
