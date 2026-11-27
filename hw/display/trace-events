@@ -177,6 +177,7 @@ ati_2d_src(uint32_t src_offset, int src_stride, int sx, int sy, bool tracked, in
 ati_2d_src_bytes(uint64_t row0, uint64_t row240, uint64_t dst0, uint64_t dst240) "src row0 0x%016"PRIx64" row240 0x%016"PRIx64" -> dst row0 0x%016"PRIx64" row240 0x%016"PRIx64
 ati_2d_op(int bpp, uint32_t rop, int src, int x, int y, int w, int h, uint32_t dst_offset, int pitch) "bpp %d rop 0x%02x src %d (%d,%d) %dx%d dst 0x%x pitch %d"
 ati_3d_packet(uint8_t op, unsigned count, uint32_t d0, uint32_t d1) "op 0x%02x count %u 0x%08x 0x%08x"
+ati_3d_tex_flags(int unit, uint32_t mc, unsigned endian, unsigned macro_tile, unsigned micro_tile, unsigned txfmt, unsigned our_fmt) "unit %d mc 0x%08x txoffset flags: endian %u macro_tile %u micro_tile %u | txformat fmt %u -> ATI_FMT %u"
 ati_3d_tex(int unit, uint32_t mc, uint32_t fmt, uint32_t filter, unsigned w, unsigned h, uint32_t cblend, uint32_t ablend) "unit %d mc 0x%08x txformat 0x%08x txfilter 0x%08x %ux%u cblend 0x%08x ablend 0x%08x"
 ati_3d_zclear(uint32_t color_mc, uint32_t depth_mc, unsigned w, unsigned h, uint32_t clearval, uint32_t zcntl) "color 0x%08x depth 0x%08x %ux%u clear 0x%08x zstencilcntl 0x%08x"
 ati_3d_target(uint32_t colorpitch, uint32_t rb3d_cntl, uint32_t re_wh, uint32_t re_tl, uint32_t se_cntl, uint32_t se_status, uint32_t w, uint32_t h, uint32_t pitch, uint32_t fmt) "colorpitch 0x%08x rb3d_cntl 0x%08x re_wh 0x%08x re_tl 0x%08x se_cntl 0x%08x se_status 0x%08x -> target %ux%u pitch %u fmt %u"

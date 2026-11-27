@@ -441,6 +441,7 @@ void ati_3d_mode_changed(ATIVGAState *s)
         memset(k, 0, sizeof(*k));
     }
     trace_ati_3d_mode_drop(n);
+    ati_glr_dump_reset();
 }
 
 /* finished asynchronous readbacks into VRAM */
@@ -946,6 +947,9 @@ static void decode_texture(ATIVGAState *s, int u, ATITexUnit *tu)
         if (u < 8 && memcmp(last[u], cur, sizeof(cur))) {
             memcpy(last[u], cur, sizeof(cur));
             trace_ati_3d_tex(u, offs, fmt, filt, w, h, cur[5], cur[6]);
+            /* PP_TXOFFSET low bits: endian swap, macro (bit 2) / micro (bit 3) tile */
+            trace_ati_3d_tex_flags(u, offs & ~31u, offs & 3, (offs >> 2) & 1,
+                                   (offs >> 3) & 1, fmt & 31, f);
         }
     }
     swp = swap_code((fmt >> 26) & 3) ^ swap_code(offs & 3) ^

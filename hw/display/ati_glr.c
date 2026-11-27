@@ -744,6 +744,105 @@ static uint8_t *glr_scratch(ATIRenderer *r, size_t len)
     return r->scratch;
 }
 
+
+/*
+ * Debug dump (environment ATI_R100_DUMP=<existing directory>): the first
+ * ATI_R100_DUMP_N (default 40) GL framebuffer readbacks after each scanout
+ * mode change (rb_NNNN_<w>x<h>_mc<mc>_fmt<f>_swap<s>.ppm, the RGBA the host
+ * read, before the guest-format encode, row 0 first), and every newly decoded
+ * texture once (tex_mc<mc>_fmt<f>_<w>x<h>_swap<s>_k<key>.ppm, level 0).
+ * Render thread only, except the budget reset.
+ */
+static int dump_budget = -1;        /* atomic; -1 = not initialised */
+static unsigned dump_count;
+static uint64_t dump_seen[256];
+
+static const char *dump_dir(void)
+{
+    static const char *dir;
+    static bool init;
+
+    if (!init) {
+        init = true;
+        dir = g_getenv("ATI_R100_DUMP");
+        if (dir && !*dir) {
+            dir = NULL;
+        }
+    }
+    return dir;
+}
+
+static int dump_limit(void)
+{
+    const char *n = g_getenv("ATI_R100_DUMP_N");
+
+    return n ? atoi(n) : 40;
+}
+
+void ati_glr_dump_reset(void)
+{
+    if (dump_dir()) {
+        qatomic_set(&dump_budget, dump_limit());
+        dump_count = 0;
+    }
+}
+
+static void dump_ppm(const char *name, const uint8_t *rgba, unsigned w,
+                     unsigned h)
+{
+    char *path = g_strdup_printf("%s/%s", dump_dir(), name);
+    FILE *f = fopen(path, "wb");
+
+    if (f) {
+        fprintf(f, "P6\n%u %u\n255\n", w, h);
+        for (size_t i = 0; i < (size_t)w * h; i++) {
+            fwrite(rgba + 4 * i, 1, 3, f);
+        }
+        fclose(f);
+    } else {
+        qemu_log_mask(LOG_GUEST_ERROR, "ati: cannot write %s\n", path);
+    }
+    g_free(path);
+}
+
+static void dump_readback(const ATIImage *img, const uint8_t *rgba,
+                          unsigned w, unsigned h)
+{
+    char *name;
+
+    if (!dump_dir()) {
+        return;
+    }
+    if (qatomic_read(&dump_budget) < 0) {
+        qatomic_set(&dump_budget, dump_limit());
+    }
+    if (qatomic_read(&dump_budget) <= 0) {
+        return;
+    }
+    qatomic_dec(&dump_budget);
+    name = g_strdup_printf("rb_%04u_%ux%u_mc%08x_fmt%u_swap%u.ppm",
+                           dump_count++, w, h, img->mc, img->fmt, img->swap);
+    dump_ppm(name, rgba, w, h);
+    g_free(name);
+}
+
+static void dump_texture(const ATITexUnit *u, uint64_t key,
+                         const uint8_t *rgba)
+{
+    char *name;
+    unsigned i = (key * 0x9E3779B97F4A7C15ULL) >> 56;
+
+    if (!dump_dir() || dump_seen[i] == key + 1) {
+        return;
+    }
+    dump_seen[i] = key + 1;
+    name = g_strdup_printf("tex_mc%08x_fmt%u_%ux%u_swap%u_k%08x.ppm",
+                           u->img.mc, u->img.fmt, u->img.w, u->img.h,
+                           u->img.swap, (uint32_t)key);
+    dump_ppm(name, rgba, u->level_w[0], u->level_h[0]);
+    g_free(name);
+}
+
 static void glr_upload(ATIRenderer *r, GLRCmd *c)
 {
     ATIGL *gl = &r->gl;
@@ -786,6 +885,7 @@ static void glr_read(ATIRenderer *r, GLRCmd *c)
             }
         }
         gl->ReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+        dump_readback(&c->img, rgba, w, h);
         for (unsigned y = 0; y < h; y++) {
             encode_row(rgba + (size_t)y * w * 4, c->data + y * c->img.pitch, w,
                        c->img.fmt, c->img.swap, c->img.mc + y * c->img.pitch);
@@ -891,6 +991,9 @@ static void glr_tex(ATIRenderer *r, GLRCmd *c)
             } else {
                 memset(rgba + y * w * 4, 0, w * 4);
             }
+        }
+        if (l == 0) {
+            dump_texture(u, c->key, rgba);
         }
         gl->TexImage2D(GL_TEXTURE_2D, l, GL_RGBA8, w, h, 0, GL_RGBA,
                        GL_UNSIGNED_BYTE, rgba);
