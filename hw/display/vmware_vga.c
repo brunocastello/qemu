@@ -22,11 +22,19 @@
  * THE SOFTWARE.
  */
 
+/*
+ * PassthroughOpenGL bridge (opt-in, passthrough-opengl-bridge=on) ported as-is
+ * from nfzerox/VirtualIntelMacOnAppleSilicon @979c3a24 (Source/vendor/qemu,
+ * GPL-2.0-or-later), with QEMU 11.1 -> 10.0 API renames only.
+ */
+
 #include "qemu/osdep.h"
 #include "qemu/module.h"
 #include "qemu/units.h"
 #include "qapi/error.h"
 #include "qemu/log.h"
+#include "qemu/error-report.h"
+#include "system/system.h"
 #include "hw/loader.h"
 #include "trace.h"
 #include "hw/pci/pci_device.h"
@@ -34,6 +42,17 @@
 #include "migration/vmstate.h"
 #include "qom/object.h"
 #include "ui/console.h"
+#include "qemu/sockets.h"
+#include <netinet/tcp.h>
+#include "vmware_passthrough_opengl_transport.h"
+#ifdef __APPLE__
+#define VIM_VRAM_INPROCESS_PROVIDER 1 /* exports vim_vram_inprocess_lookup */
+#include "vim-vram-memory.h"
+#ifdef CONFIG_VMSVGA_GPU_DISPLAY
+#define VMSVGA_GPU_DISPLAY 1 /* executor frames as Metal scanout textures */
+#include "vmware_vga_gpu.h"
+#endif
+#endif
 
 #undef VERBOSE
 #define HW_RECT_ACCEL
@@ -46,8 +65,63 @@
 
 struct vmsvga_state_s {
     VGACommonState vga;
+    /* Opt-in PassthroughOpenGL research channel. No guest TCP/IP or files. */
+    bool passthrough_opengl_bridge;
+    bool legacy_event_scanout;
+    bool passthrough_opengl_release_bql;
+    uint16_t passthrough_opengl_port;
+    uint32_t legacy_panel_width, legacy_panel_height, legacy_panel_scale;
+    uint32_t legacy_panel_generation, legacy_panel_ack;
+    uint32_t legacy_panel_request_width, legacy_panel_request_height;
+    uint32_t legacy_panel_request_scale;
+    /* Host display size, requested once the driver opts into large scanout
+     * (the boot panel is bounded to the 16 MiB driver reserve). */
+    uint32_t host_panel_width, host_panel_height, host_panel_scale;
+    bool legacy_panel_hidpi;
+    bool legacy_panel_irq_enabled;
+    bool legacy_panel_large_scanout;
+    /* UTM: the host UI sent a window size (dynamic resolution); kept over guest resets */
+    bool ui_info_seen;
+    PCIDevice *legacy_panel_pci;
+    uint32_t passthrough_opengl_next;
+    uint64_t passthrough_opengl_epoch;
+    struct VIMPassthroughOpenGLNotify *passthrough_opengl_notifications[256];
+    unsigned passthrough_opengl_notifications_done;
+    bool passthrough_opengl_notification_irq_enabled;
+    struct {
+        uint32_t token;
+        struct VIMPassthroughOpenGLStream stream;
+        bool busy;
+        uint8_t *exchange_request; /* Private snapshot retained through unlocked I/O. */
+    } passthrough_opengl_clients[128];
+#ifdef __APPLE__
+    struct VIMVRAMMemoryServer *legacy_vram_memory;
+    struct VIMVRAMMemoryServer *legacy_ram_memory;
+    Notifier legacy_ram_ready;
+#ifdef VMSVGA_GPU_DISPLAY
+    /* The executor's frames are the console scanout (vmware_vga_gpu.c);
+     * guest software updates are held back while one is (VirtualIntelMac's
+     * app drops them while a surface is active), unless no GPU frame was
+     * presented for gpu_software_after_ms (0: never), or the latest-wins
+     * policy (VIM_DISPLAY_LATEST_WINS=1 or gpu-latest-wins=on) is set.
+     * A captured fullscreen GL context publishes through VRAM and UPDATE,
+     * not GPU frames, so without the idle rule it stays black. */
+    VMSVGAGpuDisplay *gpu_display;
+    bool gpu_latest_wins;
+    uint32_t gpu_software_after_ms;
+#endif
+#endif
 
     int invalidated;
+    /* Event scanout after a mode change: VRAM still holds the previous
+     * mode's layout until the guest repaints. Show the previous image,
+     * and apply completed new-mode UPDATEs. A timer can initialize an empty
+     * console, but must never replace a retained image with unpublished VRAM. */
+    bool mode_switch_pending;
+    int64_t mode_switch_deadline;
+    int mode_switch_old_pitch;
+    int scanout_pitch; /* VRAM pitch of the mode currently on the surface */
+    DisplaySurface *mode_switch_image;
     int enable;
     int config;
     struct {
@@ -63,6 +137,7 @@ struct vmsvga_state_s {
     int new_width;
     int new_height;
     int new_depth;
+    uint32_t pitchlock;
     uint32_t guest;
     uint32_t svgaid;
     int syncing;
@@ -84,6 +159,16 @@ struct vmsvga_state_s {
     int redraw_fifo_last;
 };
 
+/* PITCHLOCK is negotiated, not imposed on old guest drivers which describe
+ * packed rows. The software display surface can have its own row stride. */
+static uint32_t vmsvga_framebuffer_pitch(struct vmsvga_state_s *s)
+{
+    return s->pitchlock ? s->pitchlock : s->new_width * s->new_depth / 8;
+}
+
+static bool vmsvga_check_size(struct vmsvga_state_s *s);
+#include "vmware_passthrough_opengl.inc"
+
 #define TYPE_VMWARE_SVGA "vmware-svga"
 
 DECLARE_INSTANCE_CHECKER(struct pci_vmsvga_state_s, VMWARE_SVGA,
@@ -97,6 +182,17 @@ struct pci_vmsvga_state_s {
     struct vmsvga_state_s chip;
     MemoryRegion io_bar;
 };
+
+/* Private research A/B control. QMP changes it under the BQL; an in-flight
+ * exchange keeps its own immutable buffers and completion decision. */
+static bool vmsvga_passthrough_opengl_get_release_bql(Object *obj, Error **errp)
+{
+    return VMWARE_SVGA(obj)->chip.passthrough_opengl_release_bql;
+}
+static void vmsvga_passthrough_opengl_set_release_bql(Object *obj, bool value, Error **errp)
+{
+    VMWARE_SVGA(obj)->chip.passthrough_opengl_release_bql = value;
+}
 
 #define SVGA_MAGIC              0x900000UL
 #define SVGA_MAKE_ID(ver)       (SVGA_MAGIC << 8 | (ver))
@@ -222,6 +318,27 @@ enum {
 #define SVGA_SCRATCH_SIZE               0x8000
 #define SVGA_MAX_WIDTH                  2368
 #define SVGA_MAX_HEIGHT                 1770
+/* Older guest drivers reserve 16 MiB; only the paired driver opts into the
+ * 256 MiB primary aperture. Keep stock VMware limits unchanged. */
+#define SVGA_VIM_LARGE_DIMENSION 8192
+#define SVGA_VIM_LARGE_SCANOUT_BYTES (256 * MiB)
+
+static unsigned vmsvga_max_width(const struct vmsvga_state_s *s)
+{
+    return !s->passthrough_opengl_bridge ? SVGA_MAX_WIDTH :
+           s->legacy_panel_large_scanout ? SVGA_VIM_LARGE_DIMENSION : 2560;
+}
+
+static unsigned vmsvga_max_height(const struct vmsvga_state_s *s)
+{
+    return !s->passthrough_opengl_bridge ? SVGA_MAX_HEIGHT :
+           s->legacy_panel_large_scanout ? SVGA_VIM_LARGE_DIMENSION : 1600;
+}
+
+static void vmsvga_ui_info(void *opaque, uint32_t head, QemuUIInfo *info);
+static void vmsvga_panel_from_ui_info(struct vmsvga_state_s *s, QemuUIInfo *info);
+static void vmsvga_request_panel(struct vmsvga_state_s *s, uint32_t width,
+                                 uint32_t height, uint32_t scale);
 
 #ifdef VERBOSE
 # define GUEST_OS_BASE          0x5001
@@ -297,12 +414,14 @@ static inline bool vmsvga_verify_rect(DisplaySurface *surface,
                                       const char *name,
                                       int x, int y, int w, int h)
 {
+    const int max_width = surface_width(surface);
+    const int max_height = surface_height(surface);
     if (x < 0) {
         trace_vmware_verify_rect_less_than_zero(name, "x", x);
         return false;
     }
-    if (x > SVGA_MAX_WIDTH) {
-        trace_vmware_verify_rect_greater_than_bound(name, "x", SVGA_MAX_WIDTH,
+    if (x > max_width) {
+        trace_vmware_verify_rect_greater_than_bound(name, "x", max_width,
                                                     x);
         return false;
     }
@@ -310,8 +429,8 @@ static inline bool vmsvga_verify_rect(DisplaySurface *surface,
         trace_vmware_verify_rect_less_than_zero(name, "w", w);
         return false;
     }
-    if (w > SVGA_MAX_WIDTH) {
-        trace_vmware_verify_rect_greater_than_bound(name, "w", SVGA_MAX_WIDTH,
+    if (w > max_width) {
+        trace_vmware_verify_rect_greater_than_bound(name, "w", max_width,
                                                     w);
         return false;
     }
@@ -326,8 +445,8 @@ static inline bool vmsvga_verify_rect(DisplaySurface *surface,
         trace_vmware_verify_rect_less_than_zero(name, "y", y);
         return false;
     }
-    if (y > SVGA_MAX_HEIGHT) {
-        trace_vmware_verify_rect_greater_than_bound(name, "y", SVGA_MAX_HEIGHT,
+    if (y > max_height) {
+        trace_vmware_verify_rect_greater_than_bound(name, "y", max_height,
                                                     y);
         return false;
     }
@@ -335,8 +454,8 @@ static inline bool vmsvga_verify_rect(DisplaySurface *surface,
         trace_vmware_verify_rect_less_than_zero(name, "h", h);
         return false;
     }
-    if (h > SVGA_MAX_HEIGHT) {
-        trace_vmware_verify_rect_greater_than_bound(name, "h", SVGA_MAX_HEIGHT,
+    if (h > max_height) {
+        trace_vmware_verify_rect_greater_than_bound(name, "h", max_height,
                                                     h);
         return false;
     }
@@ -350,18 +469,176 @@ static inline bool vmsvga_verify_rect(DisplaySurface *surface,
     return true;
 }
 
+/*
+ * After a mode change the surface is seeded with the previous image, which
+ * was read from VRAM at the old pitch. While sampled VRAM rows still equal
+ * that image at the old pitch, the guest has not repainted in the new
+ * layout, and any copy (even of a guest-reported rectangle) would shear.
+ * Compare eight rows of the retained original, not the rescaled display image.
+ * Row 0 is skipped: it has the same address in both layouts.
+ */
+static void vmsvga_release_old_mode(struct vmsvga_state_s *s)
+{
+    g_clear_pointer(&s->mode_switch_image, qemu_free_displaysurface);
+    s->mode_switch_old_pitch = 0;
+}
+
+static void vmsvga_snapshot_old_mode(struct vmsvga_state_s *s,
+                                    DisplaySurface *surface, int pitch)
+{
+    vmsvga_release_old_mode(s);
+    s->mode_switch_old_pitch = pitch;
+    if (surface_is_allocated(surface)) {
+        /* Completed software scanout is already owned: retaining its Pixman
+         * image needs no second pixel copy or VRAM alias. */
+        s->mode_switch_image = qemu_create_displaysurface_pixman(surface->image);
+    } else {
+        /* The first firmware/VBE image may alias writable guest VRAM. Freeze
+         * it once, before changing layouts, rather than retaining that alias. */
+        s->mode_switch_image = qemu_create_displaysurface(surface_width(surface),
+                                                        surface_height(surface));
+        for (int y = 0; y < surface_height(surface); y++) {
+            memcpy(surface_data(s->mode_switch_image) +
+                       y * surface_stride(s->mode_switch_image),
+                   surface_data(surface) + y * surface_stride(surface),
+                   surface_width(surface) * 4);
+        }
+    }
+}
+
+/* Preserve the completed boot picture at its apparent size and center, not
+ * one quarter of a Retina frame. Only mode changes resample; steady-state
+ * UPDATEs and the direct GPU scanout retain their existing paths. */
+static void vmsvga_fit_old_mode(DisplaySurface *source, DisplaySurface *target)
+{
+    int sw = surface_width(source), sh = surface_height(source);
+    int tw = surface_width(target), th = surface_height(target);
+    int width = tw, height = (int)((int64_t)sh * tw / sw);
+    if (height > th) {
+        height = th;
+        width = (int)((int64_t)sw * th / sh);
+    }
+    width = MAX(width, 1);
+    height = MAX(height, 1);
+    /* A separate wrapper leaves the old surface's Pixman transform/filter
+     * untouched; its completed pixels stay alive until console publication. */
+    pixman_image_t *image = pixman_image_create_bits(surface_format(source),
+        sw, sh, surface_data(source), surface_stride(source));
+    if (!image) {
+        return;
+    }
+    pixman_transform_t transform;
+    pixman_transform_init_scale(&transform,
+        pixman_double_to_fixed((double)sw / width),
+        pixman_double_to_fixed((double)sh / height));
+    pixman_image_set_transform(image, &transform);
+    pixman_image_set_filter(image, PIXMAN_FILTER_NEAREST, NULL, 0);
+    pixman_image_set_repeat(image, PIXMAN_REPEAT_PAD);
+    pixman_color_t black = { 0, 0, 0, 0xffff };
+    pixman_rectangle16_t bounds = { 0, 0, tw, th };
+    pixman_image_fill_rectangles(PIXMAN_OP_SRC, target->image, &black, 1, &bounds);
+    pixman_image_composite32(PIXMAN_OP_SRC, image, NULL, target->image,
+        0, 0, 0, 0, (tw - width) / 2, (th - height) / 2, width, height);
+    pixman_image_unref(image);
+}
+
+static bool vmsvga_vram_holds_old_mode(struct vmsvga_state_s *s)
+{
+    DisplaySurface *surface = s->mode_switch_image;
+
+    if (!surface || !s->mode_switch_old_pitch) {
+        return false;
+    }
+    int bytes = surface_width(surface) * 4;
+    int rows = surface_height(surface);
+    if (rows <= 64) {
+        return false;
+    }
+    for (int k = 0; k < 8; k++) {
+        int y = 32 + (rows - 33) * k / 7;
+        uint64_t offset = (uint64_t)y * s->mode_switch_old_pitch;
+
+        if (offset + bytes > s->vga.vram_size) {
+            continue;
+        }
+        if (memcmp(s->vga.vram_ptr + offset,
+                   surface_data(surface) + y * surface_stride(surface), bytes)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+#ifdef VMSVGA_GPU_DISPLAY
+/* Show the software surface again after GPU frames (copy of its last image;
+ * the surface itself is kept current while the GPU owns the scanout). */
+static void vmsvga_gpu_to_software(struct vmsvga_state_s *s)
+{
+    if (!vmsvga_gpu_display_active(s->gpu_display)) {
+        return;
+    }
+    DisplaySurface *old = qemu_console_surface(s->vga.con);
+    DisplaySurface *surface = qemu_create_displaysurface(surface_width(old),
+                                                         surface_height(old));
+    if (surface_bits_per_pixel(old) == surface_bits_per_pixel(surface)) {
+        int row = surface_width(old) * surface_bytes_per_pixel(old);
+        for (int y = 0; y < surface_height(old); y++) {
+            memcpy(surface_data(surface) + y * surface_stride(surface),
+                   surface_data(old) + y * surface_stride(old), row);
+        }
+    }
+    dpy_gl_scanout_disable(s->vga.con);
+    dpy_gfx_replace_surface(s->vga.con, surface);
+    dpy_gfx_update_full(s->vga.con);
+}
+#endif
+
+/* Notify the listeners of a software update, unless a GPU frame owns the
+ * scanout: its listeners would draw this surface over the frame. */
+static void vmsvga_gfx_update(struct vmsvga_state_s *s,
+                              int x, int y, int w, int h)
+{
+#ifdef VMSVGA_GPU_DISPLAY
+    if (vmsvga_gpu_display_active(s->gpu_display)) {
+        if (!s->gpu_latest_wins &&
+            (!s->gpu_software_after_ms ||
+             vmsvga_gpu_display_idle_ms(s->gpu_display) <
+                 s->gpu_software_after_ms)) {
+            return;
+        }
+        if (!s->gpu_latest_wins) {
+            static bool logged;
+
+            if (!logged) {
+                logged = true;
+                info_report("vmware-svga: software updates take the display "
+                            "back after %u ms without GPU frames",
+                            s->gpu_software_after_ms);
+            }
+        }
+        vmsvga_gpu_to_software(s);
+        return; /* the switch already published the full surface */
+    }
+#endif
+    dpy_gfx_update(s->vga.con, x, y, w, h);
+}
+
 static inline void vmsvga_update_rect(struct vmsvga_state_s *s,
                                       int x, int y, int w, int h)
 {
     DisplaySurface *surface = qemu_console_surface(s->vga.con);
     int line;
-    int bypl;
+    int bypl, src_bypl;
     int width;
     int start;
     uint8_t *src;
     uint8_t *dst;
 
     if (!vmsvga_verify_rect(surface, __func__, x, y, w, h)) {
+        if (s->mode_switch_pending) {
+            /* A full-screen VRAM copy now would publish old-mode rows. */
+            return;
+        }
         /* go for a fullscreen update as fallback */
         x = 0;
         y = 0;
@@ -370,15 +647,24 @@ static inline void vmsvga_update_rect(struct vmsvga_state_s *s,
     }
 
     bypl = surface_stride(surface);
+    src_bypl = vmsvga_framebuffer_pitch(s);
     width = surface_bytes_per_pixel(surface) * w;
     start = surface_bytes_per_pixel(surface) * x + bypl * y;
-    src = s->vga.vram_ptr + start;
+    src = s->vga.vram_ptr + surface_bytes_per_pixel(surface) * x + src_bypl * y;
     dst = surface_data(surface) + start;
 
-    for (line = h; line > 0; line--, src += bypl, dst += bypl) {
+    if (s->mode_switch_pending && vmsvga_vram_holds_old_mode(s)) {
+        return;
+    }
+    for (line = h; line > 0; line--, src += src_bypl, dst += bypl) {
         memcpy(dst, src, width);
     }
-    dpy_gfx_update(s->vga.con, x, y, w, h);
+    if (x == 0 && y == 0 && w == surface_width(surface) &&
+        h == surface_height(surface)) {
+        s->mode_switch_pending = false;
+        vmsvga_release_old_mode(s);
+    }
+    vmsvga_gfx_update(s, x, y, w, h);
 }
 
 static inline void vmsvga_update_rect_flush(struct vmsvga_state_s *s)
@@ -422,7 +708,7 @@ static inline int vmsvga_copy_rect(struct vmsvga_state_s *s,
 {
     DisplaySurface *surface = qemu_console_surface(s->vga.con);
     uint8_t *vram = s->vga.vram_ptr;
-    int bypl = surface_stride(surface);
+    int bypl = vmsvga_framebuffer_pitch(s);
     int bypp = surface_bytes_per_pixel(surface);
     int width = bypp * w;
     int line = h;
@@ -459,7 +745,7 @@ static inline int vmsvga_fill_rect(struct vmsvga_state_s *s,
                 uint32_t c, int x, int y, int w, int h)
 {
     DisplaySurface *surface = qemu_console_surface(s->vga.con);
-    int bypl = surface_stride(surface);
+    int bypl = vmsvga_framebuffer_pitch(s);
     int width = surface_bytes_per_pixel(surface) * w;
     int line = h;
     int column;
@@ -613,7 +899,7 @@ static inline uint32_t vmsvga_fifo_read(struct vmsvga_state_s *s)
     return le32_to_cpu(vmsvga_fifo_read_raw(s));
 }
 
-static void vmsvga_fifo_run(struct vmsvga_state_s *s)
+static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool framebuffer_valid)
 {
     uint32_t cmd, colour;
     int args, len, maxloop = 1024;
@@ -626,10 +912,13 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s)
         /* May need to go back to the start of the command if incomplete */
         cmd_start = s->fifo_stop;
 
-        switch (cmd = vmsvga_fifo_read(s)) {
+        cmd = vmsvga_fifo_read(s);
+        len--; /* Every packet consumes its opcode, including NOP/badcmd. */
+        switch (cmd) {
         case SVGA_CMD_UPDATE:
         case SVGA_CMD_UPDATE_VERBOSE:
-            len -= 5;
+            args = cmd == SVGA_CMD_UPDATE_VERBOSE ? 5 : 4;
+            len -= args;
             if (len < 0) {
                 goto rewind;
             }
@@ -638,11 +927,16 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s)
             y = vmsvga_fifo_read(s);
             width = vmsvga_fifo_read(s);
             height = vmsvga_fifo_read(s);
-            vmsvga_update_rect_delayed(s, x, y, width, height);
+            if (cmd == SVGA_CMD_UPDATE_VERBOSE) {
+                vmsvga_fifo_read(s); /* opaque reason */
+            }
+            if (framebuffer_valid) {
+                vmsvga_update_rect_delayed(s, x, y, width, height);
+            }
             break;
 
         case SVGA_CMD_RECT_FILL:
-            len -= 6;
+            len -= 5;
             if (len < 0) {
                 goto rewind;
             }
@@ -653,7 +947,8 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s)
             width = vmsvga_fifo_read(s);
             height = vmsvga_fifo_read(s);
 #ifdef HW_FILL_ACCEL
-            if (vmsvga_fill_rect(s, colour, x, y, width, height) == 0) {
+            if (!framebuffer_valid ||
+                vmsvga_fill_rect(s, colour, x, y, width, height) == 0) {
                 break;
             }
 #endif
@@ -661,7 +956,7 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s)
             goto badcmd;
 
         case SVGA_CMD_RECT_COPY:
-            len -= 7;
+            len -= 6;
             if (len < 0) {
                 goto rewind;
             }
@@ -673,7 +968,8 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s)
             width = vmsvga_fifo_read(s);
             height = vmsvga_fifo_read(s);
 #ifdef HW_RECT_ACCEL
-            if (vmsvga_copy_rect(s, x, y, dx, dy, width, height) == 0) {
+            if (!framebuffer_valid ||
+                vmsvga_copy_rect(s, x, y, dx, dy, width, height) == 0) {
                 break;
             }
 #endif
@@ -681,7 +977,7 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s)
             goto badcmd;
 
         case SVGA_CMD_DEFINE_CURSOR:
-            len -= 8;
+            len -= 7;
             if (len < 0) {
                 goto rewind;
             }
@@ -728,25 +1024,62 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s)
          * for so we can avoid FIFO desync if driver uses them illegally.
          */
         case SVGA_CMD_DEFINE_ALPHA_CURSOR:
-            len -= 6;
+            len -= 5;
             if (len < 0) {
                 goto rewind;
             }
-            vmsvga_fifo_read(s);
-            vmsvga_fifo_read(s);
-            vmsvga_fifo_read(s);
+            cursor.id = vmsvga_fifo_read(s);
+            cursor.hot_x = vmsvga_fifo_read(s);
+            cursor.hot_y = vmsvga_fifo_read(s);
             x = vmsvga_fifo_read(s);
             y = vmsvga_fifo_read(s);
+            trace_vmware_cursor_define(x, y, cursor.hot_x, cursor.hot_y);
+            if (x <= 0 || x > 256 || y <= 0 || y > 256 ||
+                cursor.hot_x >= x || cursor.hot_y >= y) {
+                goto badcmd;
+            }
             args = x * y;
-            goto badcmd;
+            len -= args;
+            if (len < 0) {
+                goto rewind;
+            }
+            {
+                QEMUCursor *qc = cursor_alloc(x, y);
+                qc->hot_x = cursor.hot_x;
+                qc->hot_y = cursor.hot_y;
+                for (int i = 0; i < args; i++) {
+                    qc->data[i] = vmsvga_fifo_read(s);
+                }
+                dpy_cursor_define(s->vga.con, qc);
+                cursor_unref(qc);
+            }
+            break;
         case SVGA_CMD_RECT_ROP_FILL:
             args = 6;
             goto badcmd;
         case SVGA_CMD_RECT_ROP_COPY:
             args = 7;
             goto badcmd;
+        case SVGA_CMD_FRONT_ROP_FILL:
+            len -= 6;
+            if (len < 0) {
+                goto rewind;
+            }
+            vmsvga_fifo_read(s); /* color hint, not a write into guest VRAM */
+            x = vmsvga_fifo_read(s);
+            y = vmsvga_fifo_read(s);
+            width = vmsvga_fifo_read(s);
+            height = vmsvga_fifo_read(s);
+            if (vmsvga_fifo_read(s) != 3) { /* SVGA_ROP_COPY */
+                args = 0;
+                goto badcmd;
+            }
+            if (framebuffer_valid) {
+                vmsvga_update_rect_delayed(s, x, y, width, height);
+            }
+            break;
         case SVGA_CMD_DRAW_GLYPH_CLIPPED:
-            len -= 4;
+            len -= 3;
             if (len < 0) {
                 goto rewind;
             }
@@ -764,10 +1097,18 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s)
          */
         case SVGA_CMD_SURFACE_FILL:
         case SVGA_CMD_SURFACE_COPY:
-        case SVGA_CMD_FRONT_ROP_FILL:
-        case SVGA_CMD_FENCE:
         case SVGA_CMD_INVALID_CMD:
             break; /* Nop */
+
+        case SVGA_CMD_FENCE:
+            if (--len < 0) {
+                goto rewind;
+            }
+            colour = vmsvga_fifo_read(s);
+            if (s->fifo_min >= (SVGA_FIFO_FENCE + 1) * sizeof(uint32_t)) {
+                s->fifo[SVGA_FIFO_FENCE] = cpu_to_le32(colour);
+            }
+            break;
 
         default:
             args = 0;
@@ -776,7 +1117,7 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s)
             if (len < 0) {
                 goto rewind;
             }
-            while (args--) {
+            while (args-- > 0) {
                 vmsvga_fifo_read(s);
             }
             printf("%s: Unknown command 0x%02x in SVGA command FIFO\n",
@@ -792,6 +1133,8 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s)
 
     s->syncing = 0;
 }
+
+static bool vmsvga_update_display(void *opaque);
 
 static uint32_t vmsvga_index_read(void *opaque, uint32_t address)
 {
@@ -833,11 +1176,11 @@ static uint32_t vmsvga_value_read(void *opaque, uint32_t address)
         break;
 
     case SVGA_REG_MAX_WIDTH:
-        ret = SVGA_MAX_WIDTH;
+        ret = vmsvga_max_width(s);
         break;
 
     case SVGA_REG_MAX_HEIGHT:
-        ret = SVGA_MAX_HEIGHT;
+        ret = vmsvga_max_height(s);
         break;
 
     case SVGA_REG_DEPTH:
@@ -870,7 +1213,7 @@ static uint32_t vmsvga_value_read(void *opaque, uint32_t address)
 
     case SVGA_REG_BYTES_PER_LINE:
         if (s->new_width) {
-            ret = (s->new_depth * s->new_width) / 8;
+            ret = vmsvga_framebuffer_pitch(s);
         } else {
             ret = surface_stride(surface);
         }
@@ -886,6 +1229,11 @@ static uint32_t vmsvga_value_read(void *opaque, uint32_t address)
     case SVGA_REG_FB_OFFSET:
         ret = 0x0;
         break;
+    case VIM_GL_BOOT_FRAMEBUFFER_REGISTER:
+        if (s->passthrough_opengl_bridge && s->legacy_event_scanout && s->enable && s->config)
+            vmsvga_check_size(s);
+        ret = s->passthrough_opengl_bridge && vmsvga_boot_framebuffer(s) ? VIM_GL_BOOT_FRAMEBUFFER_MAGIC : 0;
+        break;
 
     case SVGA_REG_VRAM_SIZE:
         ret = s->vga.vram_size; /* No physical VRAM besides the framebuffer */
@@ -895,8 +1243,87 @@ static uint32_t vmsvga_value_read(void *opaque, uint32_t address)
         ret = s->vga.vram_size;
         break;
 
+    case VIM_GL_REGISTER:
+        ret = s->passthrough_opengl_bridge ? VIM_GL_MAGIC : 0;
+        break;
+    case VIM_GL_CAPABILITIES_REGISTER:
+        ret = s->passthrough_opengl_bridge ? VIM_GL_CAP_DIRECT_READ : 0;
+        break;
+    case VIM_GL_WRITE_CAPABILITIES_REGISTER:
+        /* Keep the original register value exactly 1 for old guests which
+         * compare it rather than treating it as a capability bit mask. */
+        ret = s->passthrough_opengl_bridge ? VIM_GL_WRITE_MAGIC : 0;
+        break;
+    case VIM_GL_SCATTER_CAPABILITIES_REGISTER:
+        ret = s->passthrough_opengl_bridge ? VIM_GL_SCATTER_MAGIC : 0;
+        break;
+    case VIM_GL_RAM_SCATTER_CAPABILITIES_REGISTER:
+        ret = s->passthrough_opengl_bridge ? VIM_GL_RAM_SCATTER_MAGIC : 0;
+        break;
+    case VIM_GL_FRAMEBUFFER_BLIT_CAPABILITIES_REGISTER:
+        ret = s->passthrough_opengl_bridge ? VIM_GL_FRAMEBUFFER_BLIT_MAGIC : 0;
+        break;
+    case VIM_GL_RAM_UPLOAD_CAPABILITIES_REGISTER:
+        ret = s->passthrough_opengl_bridge ? VIM_GL_RAM_UPLOAD_MAGIC : 0;
+        break;
+    case VIM_GL_MASKED_SCATTER_CAPABILITIES_REGISTER:
+        ret = s->passthrough_opengl_bridge ? VIM_GL_MASKED_SCATTER_MAGIC : 0;
+        break;
+    case VIM_GL_EXCHANGE_CAPABILITIES_REGISTER:
+        ret = s->passthrough_opengl_bridge ? VIM_GL_EXCHANGE_MAGIC : 0;
+        break;
+    case VIM_GL_LARGE_EXCHANGE_CAPABILITIES_REGISTER:
+        ret = s->passthrough_opengl_bridge ? VIM_GL_LARGE_EXCHANGE_MAGIC : 0;
+        break;
+    case VIM_GL_BULK_UPLOAD_CAPABILITIES_REGISTER:
+        ret = s->passthrough_opengl_bridge ? VIM_GL_BULK_UPLOAD_MAGIC : 0;
+        break;
+    case VIM_GL_DOORBELL_CAPABILITIES_REGISTER:
+        ret = s->passthrough_opengl_bridge ? VIM_GL_DOORBELL_MAGIC : 0;
+        break;
+    case VIM_GL_NOTIFY_CAPABILITIES_REGISTER:
+        ret = s->passthrough_opengl_bridge && vmsvga_gl_backing_notify_available() ?
+              VIM_GL_NOTIFY_MAGIC : 0;
+        break;
+    case VIM_PANEL_CAPABILITIES_REGISTER:
+        ret = s->passthrough_opengl_bridge ? VIM_PANEL_MAGIC : 0;
+        break;
+    case VIM_PANEL_WIDTH_REGISTER:
+        ret = s->passthrough_opengl_bridge ? s->legacy_panel_width : 0;
+        break;
+    case VIM_PANEL_HEIGHT_REGISTER:
+        ret = s->passthrough_opengl_bridge ? s->legacy_panel_height : 0;
+        break;
+    case VIM_PANEL_SCALE_REGISTER:
+        ret = s->passthrough_opengl_bridge ? s->legacy_panel_scale : 0;
+        break;
+    case VIM_PANEL_IRQ_CAPABILITIES_REGISTER:
+        ret = s->passthrough_opengl_bridge ? VIM_PANEL_IRQ_MAGIC : 0;
+        break;
+    case VIM_PANEL_GENERATION_REGISTER:
+        ret = s->passthrough_opengl_bridge ? s->legacy_panel_generation : 0;
+        break;
+    case VIM_PANEL_IRQ_ENABLE_REGISTER:
+        ret = s->passthrough_opengl_bridge && s->legacy_panel_irq_enabled;
+        break;
+    case VIM_PANEL_REQUEST_WIDTH_REGISTER:
+        ret = s->passthrough_opengl_bridge ? s->legacy_panel_request_width : 0;
+        break;
+    case VIM_PANEL_REQUEST_HEIGHT_REGISTER:
+        ret = s->passthrough_opengl_bridge ? s->legacy_panel_request_height : 0;
+        break;
+    case VIM_PANEL_REQUEST_SCALE_REGISTER:
+        ret = s->passthrough_opengl_bridge ? s->legacy_panel_request_scale : 0;
+        break;
+    case VIM_PANEL_LARGE_SCANOUT_REGISTER:
+        ret = s->passthrough_opengl_bridge && s->vga.vram_size > SVGA_VIM_LARGE_SCANOUT_BYTES ?
+            VIM_PANEL_LARGE_SCANOUT_MAGIC : 0;
+        break;
     case SVGA_REG_CAPABILITIES:
         caps = SVGA_CAP_NONE;
+        if (s->passthrough_opengl_bridge) {
+            caps |= SVGA_CAP_PITCHLOCK;
+        }
 #ifdef HW_RECT_ACCEL
         caps |= SVGA_CAP_RECT_COPY;
 #endif
@@ -904,7 +1331,7 @@ static uint32_t vmsvga_value_read(void *opaque, uint32_t address)
         caps |= SVGA_CAP_RECT_FILL;
 #endif
 #ifdef HW_MOUSE_ACCEL
-        caps |= SVGA_CAP_CURSOR | SVGA_CAP_CURSOR_BYPASS_2 |
+        caps |= SVGA_CAP_CURSOR | SVGA_CAP_ALPHA_CURSOR | SVGA_CAP_CURSOR_BYPASS_2 |
                 SVGA_CAP_CURSOR_BYPASS;
 #endif
         ret = caps;
@@ -954,9 +1381,12 @@ static uint32_t vmsvga_value_read(void *opaque, uint32_t address)
         ret = s->scratch_size;
         break;
 
+    case SVGA_REG_PITCHLOCK:
+        ret = s->pitchlock;
+        break;
+
     case SVGA_REG_MEM_REGS:
     case SVGA_REG_NUM_DISPLAYS:
-    case SVGA_REG_PITCHLOCK:
     case SVGA_PALETTE_BASE ... SVGA_PALETTE_END:
         ret = 0;
         break;
@@ -995,6 +1425,40 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value)
         trace_vmware_value_write(s->index, value);
     }
     switch (s->index) {
+    case VIM_PANEL_IRQ_ENABLE_REGISTER:
+        if (s->passthrough_opengl_bridge && value <= 1) {
+            s->legacy_panel_irq_enabled = value;
+            vmsvga_legacy_irq_update(s);
+        }
+        break;
+    case VIM_PANEL_LARGE_SCANOUT_REGISTER:
+        if (s->passthrough_opengl_bridge && s->vga.vram_size > SVGA_VIM_LARGE_SCANOUT_BYTES &&
+            value == VIM_PANEL_LARGE_SCANOUT_MAGIC && !s->legacy_panel_large_scanout) {
+            s->legacy_panel_large_scanout = true;
+            /*
+             * The app may have sent its size before the driver attached. A
+             * window size (dynamic resolution) wins: in full screen it is the
+             * usable screen area; otherwise grow to the host display size the
+             * boot panel could not hold.
+             */
+            QemuUIInfo info = *dpy_get_ui_info(s->vga.con);
+            if (s->ui_info_seen && info.width >= 800 && info.height >= 600) {
+                vmsvga_panel_from_ui_info(s, &info);
+            } else if (s->host_panel_width) {
+                vmsvga_request_panel(s, s->host_panel_width, s->host_panel_height,
+                                     s->host_panel_scale);
+            }
+        }
+        break;
+    case VIM_PANEL_ACK_REGISTER:
+        if (s->passthrough_opengl_bridge && value == s->legacy_panel_generation) {
+            s->legacy_panel_ack = value;
+            vmsvga_legacy_irq_update(s);
+        }
+        break;
+    case VIM_GL_REGISTER:
+        vmsvga_passthrough_opengl(s, value);
+        break;
     case SVGA_REG_ID:
         if (value == SVGA_ID_2 || value == SVGA_ID_1 || value == SVGA_ID_0) {
             s->svgaid = value;
@@ -1002,6 +1466,21 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value)
         break;
 
     case SVGA_REG_ENABLE:
+        if (s->passthrough_opengl_bridge && s->enable && !value) {
+            /* Guest leaves SVGA (shutdown, restart): blank the old scanout
+             * like a real display. Otherwise the last frame left in VRAM (a
+             * fullscreen game's) shows in VGA mode, gets into the frontend's
+             * VM screenshot and reappears at the next start. */
+#ifdef VMSVGA_GPU_DISPLAY
+            vmsvga_gpu_to_software(s);
+#endif
+            uint64_t bytes = MIN((uint64_t)vmsvga_framebuffer_pitch(s) *
+                                 MAX(s->new_height, 0), s->vga.vram_size);
+            if (bytes) {
+                memset(s->vga.vram_ptr, 0, bytes);
+                memory_region_set_dirty(&s->vga.vram, 0, bytes);
+            }
+        }
         s->enable = !!value;
         s->invalidated = 1;
         s->vga.hw_ops->invalidate(&s->vga);
@@ -1013,7 +1492,7 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value)
         break;
 
     case SVGA_REG_WIDTH:
-        if (value <= SVGA_MAX_WIDTH) {
+        if (value <= vmsvga_max_width(s)) {
             s->new_width = value;
             s->invalidated = 1;
         } else {
@@ -1023,7 +1502,7 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value)
         break;
 
     case SVGA_REG_HEIGHT:
-        if (value <= SVGA_MAX_HEIGHT) {
+        if (value <= vmsvga_max_height(s)) {
             s->new_height = value;
             s->invalidated = 1;
         } else {
@@ -1051,7 +1530,19 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value)
 
     case SVGA_REG_SYNC:
         s->syncing = 1;
-        vmsvga_fifo_run(s); /* Or should we just wait for update_display? */
+        if (s->legacy_event_scanout && s->enable && s->config) {
+            /* The guest has completed its framebuffer update and rung the
+             * FIFO doorbell. Notify the display now, not at the next timer.
+             * The listener schedules its own coalesced, ACK-owned scanout. */
+            if (!vmsvga_update_display(s)) {
+                /* A transitional mode cannot publish pixels, but SYNC
+                 * must still retire FIFO packets and release BUSY. Otherwise
+                 * a guest reserving space spins before it can set a mode. */
+                vmsvga_fifo_run(s, false);
+            }
+        } else {
+            vmsvga_fifo_run(s, true);
+        }
         break;
 
     case SVGA_REG_GUEST_ID:
@@ -1087,10 +1578,18 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value)
 #endif
         break;
 
+    case SVGA_REG_PITCHLOCK:
+        if (s->passthrough_opengl_bridge &&
+            (!value || (!(value & 3) && value >= s->new_width * 4 &&
+                        value <= vmsvga_max_width(s) * 4))) {
+            s->pitchlock = value;
+            s->invalidated = 1;
+        }
+        break;
+
     case SVGA_REG_DEPTH:
     case SVGA_REG_MEM_REGS:
     case SVGA_REG_NUM_DISPLAYS:
-    case SVGA_REG_PITCHLOCK:
     case SVGA_PALETTE_BASE ... SVGA_PALETTE_END:
         break;
 
@@ -1116,50 +1615,150 @@ static void vmsvga_bios_write(void *opaque, uint32_t address, uint32_t data)
     printf("%s: what are we supposed to do with (%08x)?\n", __func__, data);
 }
 
-static inline void vmsvga_check_size(struct vmsvga_state_s *s)
+static inline bool vmsvga_check_size(struct vmsvga_state_s *s)
 {
     DisplaySurface *surface = qemu_console_surface(s->vga.con);
+    uint32_t stride = vmsvga_framebuffer_pitch(s);
+
+    /* The larger research mode must remain backed by the actual aperture,
+     * not merely by independently valid width and height registers. */
+    if (s->new_width <= 0 || s->new_height <= 0 || s->new_depth != 32 ||
+        stride < (uint32_t)s->new_width * 4 ||
+        (uint64_t)stride * s->new_height > s->vga.vram_size ||
+        (s->legacy_panel_large_scanout &&
+         (uint64_t)stride * s->new_height > SVGA_VIM_LARGE_SCANOUT_BYTES)) {
+        return false;
+    }
 
     if (s->new_width != surface_width(surface) ||
         s->new_height != surface_height(surface) ||
-        s->new_depth != surface_bits_per_pixel(surface)) {
-        int stride = (s->new_depth * s->new_width) / 8;
+        s->new_depth != surface_bits_per_pixel(surface) ||
+        (!s->legacy_event_scanout && stride != surface_stride(surface))) {
         pixman_format_code_t format =
             qemu_default_pixman_format(s->new_depth, true);
         trace_vmware_setmode(s->new_width, s->new_height, s->new_depth);
-        surface = qemu_create_displaysurface_from(s->new_width, s->new_height,
-                                                  format, stride,
-                                                  s->vga.vram_ptr);
+        if (s->legacy_event_scanout) {
+            /* UPDATE/SYNC publishes completed guest writes. Retain those
+             * pixels, not an alias of VRAM that the next guest frame can
+             * overwrite before the asynchronous app listener copies it.
+             * GPU-primary scanout still bypasses this software fallback. */
+            DisplaySurface *previous = qemu_console_surface(s->vga.con);
+            if (previous && !surface_is_placeholder(previous) &&
+                surface_bits_per_pixel(previous) == 32 &&
+                (!s->mode_switch_pending || !s->mode_switch_image)) {
+                /* The first SVGA mode follows the firmware's ordinary VGA
+                 * surface, before scanout_pitch has ever been recorded. */
+                int old_pitch = s->scanout_pitch ? s->scanout_pitch :
+                                surface_stride(previous);
+                /* Height-only changes also need a centered retained image,
+                 * even though reusing the old pitch would not shear rows. */
+                vmsvga_snapshot_old_mode(s, previous, old_pitch);
+            }
+            surface = qemu_create_displaysurface(s->new_width, s->new_height);
+            /* Seed with the image already on screen, not old-layout VRAM. */
+            if (s->mode_switch_image) {
+                vmsvga_fit_old_mode(s->mode_switch_image, surface);
+            }
+            s->mode_switch_pending = true;
+            /* Snow Leopard repaints about 1.0-1.2 s after a mode change. */
+            s->mode_switch_deadline =
+                qemu_clock_get_ms(QEMU_CLOCK_REALTIME) + 3000;
+        } else {
+            surface = qemu_create_displaysurface_from(s->new_width, s->new_height,
+                                                     format, stride,
+                                                     s->vga.vram_ptr);
+        }
+#ifdef VMSVGA_GPU_DISPLAY
+        /* GPU frames were sized for the old mode: the new mode starts on the
+         * software surface, and the next GPU frame takes the console back
+         * (its cleanup callback releases the current frame). */
+        if (vmsvga_gpu_display_active(s->gpu_display)) {
+            dpy_gl_scanout_disable(s->vga.con);
+        }
+#endif
         dpy_gfx_replace_surface(s->vga.con, surface);
+        s->scanout_pitch = stride;
         s->invalidated = 1;
     }
+    return true;
 }
 
-static void vmsvga_update_display(void *opaque)
+static bool vmsvga_update_display(void *opaque)
 {
     struct vmsvga_state_s *s = opaque;
 
     if (!s->enable || !s->config) {
         /* in standard vga mode */
+        s->mode_switch_pending = false;
+        vmsvga_release_old_mode(s);
+        s->scanout_pitch = 0;
+#ifdef VMSVGA_GPU_DISPLAY
+        vmsvga_gpu_to_software(s); /* back to VGA: not the guest's GPU frames */
+#endif
         s->vga.hw_ops->gfx_update(&s->vga);
-        return;
+        return true;
     }
 
-    vmsvga_check_size(s);
+    if (!vmsvga_check_size(s)) {
+        return false;
+    }
 
-    vmsvga_fifo_run(s);
+    vmsvga_fifo_run(s, true);
     vmsvga_update_rect_flush(s);
 
     if (s->invalidated) {
         s->invalidated = 0;
-        dpy_gfx_update_full(s->vga.con);
+        if (s->legacy_event_scanout) {
+            /* The first update after a mode change must also initialize the
+             * owned scanout; update_rect_flush intentionally drops old-mode
+             * rectangles while invalidated. */
+            DisplaySurface *surface = qemu_console_surface(s->vga.con);
+            if (s->mode_switch_pending) {
+                vmsvga_gfx_update(s, 0, 0, surface_width(surface),
+                                  surface_height(surface));
+            } else {
+                vmsvga_update_rect(s, 0, 0, surface_width(surface),
+                                   surface_height(surface));
+            }
+        } else {
+            DisplaySurface *surface = qemu_console_surface(s->vga.con);
+            vmsvga_gfx_update(s, 0, 0, surface_width(surface),
+                              surface_height(surface));
+        }
+    } else if (s->mode_switch_pending && !s->mode_switch_image &&
+               qemu_clock_get_ms(QEMU_CLOCK_REALTIME) >= s->mode_switch_deadline) {
+        /* Preserve raw-VRAM initialization only when no completed old image
+         * exists. A changed byte in an old-pitch boot console (e.g. a spinner)
+         * is not a completed new-pitch frame. Keep the fitted image until
+         * UPDATE publishes one, rather than expose stripes after three seconds. */
+        DisplaySurface *surface = qemu_console_surface(s->vga.con);
+        vmsvga_update_rect(s, 0, 0, surface_width(surface), surface_height(surface));
     }
+
+    return true;
 }
 
 static void vmsvga_reset(DeviceState *dev)
 {
     struct pci_vmsvga_state_s *pci = VMWARE_SVGA(dev);
     struct vmsvga_state_s *s = &pci->chip;
+
+    vmsvga_passthrough_opengl_reset(s);
+#ifdef VMSVGA_GPU_DISPLAY
+    vmsvga_gpu_to_software(s);
+#endif
+    s->mode_switch_pending = false;
+    vmsvga_release_old_mode(s);
+    s->scanout_pitch = 0;
+
+    s->legacy_panel_generation = s->legacy_panel_ack = 0;
+    s->legacy_panel_request_width = s->legacy_panel_request_height = 0;
+    s->legacy_panel_request_scale = 0;
+    s->legacy_panel_irq_enabled = false;
+    s->legacy_panel_large_scanout = false;
+    if (s->passthrough_opengl_bridge) {
+        pci_set_irq(PCI_DEVICE(dev), 0);
+    }
 
     s->index = 0;
     s->enable = 0;
@@ -1168,6 +1767,7 @@ static void vmsvga_reset(DeviceState *dev)
     s->cursor.on = false;
     s->redraw_fifo_last = 0;
     s->syncing = 0;
+    s->pitchlock = 0;
 
     vga_dirty_log_start(&s->vga);
 }
@@ -1183,7 +1783,7 @@ static void vmsvga_invalidate_display(void *opaque)
     s->invalidated = 1;
 }
 
-static void vmsvga_text_update(void *opaque, console_ch_t *chardata)
+static void vmsvga_text_update(void *opaque, uint32_t *chardata)
 {
     struct vmsvga_state_s *s = opaque;
 
@@ -1197,6 +1797,9 @@ static int vmsvga_post_load(void *opaque, int version_id)
     struct vmsvga_state_s *s = opaque;
 
     s->invalidated = 1;
+    s->mode_switch_pending = false;
+    vmsvga_release_old_mode(s);
+    s->scanout_pitch = 0;
     if (s->config) {
         s->fifo = (uint32_t *) s->fifo_ptr;
     }
@@ -1205,7 +1808,7 @@ static int vmsvga_post_load(void *opaque, int version_id)
 
 static const VMStateDescription vmstate_vmware_vga_internal = {
     .name = "vmware_vga_internal",
-    .version_id = 0,
+    .version_id = 1,
     .minimum_version_id = 0,
     .post_load = vmsvga_post_load,
     .fields = (const VMStateField[]) {
@@ -1225,6 +1828,7 @@ static const VMStateDescription vmstate_vmware_vga_internal = {
         VMSTATE_UINT32(svgaid, struct vmsvga_state_s),
         VMSTATE_INT32(syncing, struct vmsvga_state_s),
         VMSTATE_UNUSED(4), /* was fb_size */
+        VMSTATE_UINT32_V(pitchlock, struct vmsvga_state_s, 1),
         VMSTATE_END_OF_LIST()
     }
 };
@@ -1241,19 +1845,198 @@ static const VMStateDescription vmstate_vmware_vga = {
     }
 };
 
+static void vmsvga_request_panel(struct vmsvga_state_s *s, uint32_t width,
+                                 uint32_t height, uint32_t scale)
+{
+    /* Local research only. Immutable native-panel metadata remains separate
+     * from the coalesced requested mode. No frame-time guest polling. */
+    if (!s->passthrough_opengl_bridge || width < 800 || height < 600 ||
+        width > vmsvga_max_width(s) || height > vmsvga_max_height(s) ||
+        (width == s->legacy_panel_request_width &&
+         height == s->legacy_panel_request_height &&
+         scale == s->legacy_panel_request_scale)) {
+        return;
+    }
+    s->legacy_panel_request_width = width;
+    s->legacy_panel_request_height = height;
+    s->legacy_panel_request_scale = scale;
+    ++s->legacy_panel_generation;
+    if (s->legacy_panel_generation == s->legacy_panel_ack) {
+        ++s->legacy_panel_generation;
+    }
+    if (s->legacy_panel_irq_enabled) {
+        vmsvga_legacy_irq_update(s);
+    }
+}
+
+static void vmsvga_ui_info(void *opaque, uint32_t head, QemuUIInfo *info)
+{
+    struct vmsvga_state_s *s = opaque;
+
+    if (head) {
+        return;
+    }
+    s->ui_info_seen = true;
+    vmsvga_panel_from_ui_info(s, info);
+}
+
+static void vmsvga_panel_from_ui_info(struct vmsvga_state_s *s, QemuUIInfo *info)
+{
+    uint32_t width = info->width, height = info->height, scale = 1;
+
+    /* VirtualIntelMac's app sends the window's backing scale (logical_scale);
+     * QEMU 10.0's QemuUIInfo has none. A HiDPI panel (ui-scale 2, hidpi on)
+     * means a Retina host window sending backing pixels: keep 2x, as VIM does,
+     * so the guest display agent selects the 2x mode. Even sizes only. */
+    if (s->legacy_panel_scale == 2 || s->host_panel_scale == 2) {
+        width &= ~1u;
+        height &= ~1u;
+        scale = 2;
+    }
+    vmsvga_request_panel(s, width, height, scale);
+}
+
+/* QEMU 10.0: gfx_update returns void (11.1: bool). */
+static void vmsvga_update_display_void(void *opaque)
+{
+    vmsvga_update_display(opaque);
+}
+
 static const GraphicHwOps vmsvga_ops = {
     .invalidate  = vmsvga_invalidate_display,
-    .gfx_update  = vmsvga_update_display,
+    .gfx_update  = vmsvga_update_display_void,
     .text_update = vmsvga_text_update,
+    .ui_info     = vmsvga_ui_info,
 };
+
+#ifdef VMSVGA_GPU_DISPLAY
+static void vmsvga_gl_block(void *opaque, bool block)
+{
+    struct vmsvga_state_s *s = opaque;
+
+    vmsvga_gpu_display_gl_block(s->gpu_display, block);
+}
+
+/* Only with the in-process display owner, so the console's GL block
+ * bookkeeping is otherwise as before. */
+static const GraphicHwOps vmsvga_gpu_ops = {
+    .invalidate  = vmsvga_invalidate_display,
+    .gfx_update  = vmsvga_update_display_void,
+    .text_update = vmsvga_text_update,
+    .ui_info     = vmsvga_ui_info,
+    .gl_block    = vmsvga_gl_block,
+};
+#endif
+
+#ifdef __APPLE__
+/*
+ * UTM: with passthrough-opengl-bridge=on and no explicit
+ * VIM_PASSTHROUGH_OPENGL_INPROCESS_LIBRARY, use the host executor shipped
+ * next to QEMU -- the app's Frameworks/VIMPassthroughOpenGLHost.framework
+ * (UTM) or libVIMPassthroughOpenGLHost.dylib beside the binary (standalone)
+ * -- with the defaults VirtualIntelMac's launcher sets for it.
+ */
+static void vmsvga_passthrough_opengl_default_env(void)
+{
+    Dl_info info;
+    if (getenv("VIM_PASSTHROUGH_OPENGL_INPROCESS_LIBRARY") ||
+        !dladdr((const void *)vmsvga_passthrough_opengl_default_env, &info) ||
+        !info.dli_fname) {
+        return;
+    }
+    g_autofree char *bin_dir = g_path_get_dirname(info.dli_fname);
+    /* .../Frameworks/qemu-x-softmmu.framework/Versions/A/<binary> */
+    g_autofree char *frameworks = g_build_filename(bin_dir, "..", "..", "..", NULL);
+    g_autofree char *in_app = g_build_filename(frameworks,
+        "VIMPassthroughOpenGLHost.framework", "Versions", "A",
+        "VIMPassthroughOpenGLHost", NULL);
+    g_autofree char *beside = g_build_filename(bin_dir,
+        "libVIMPassthroughOpenGLHost.dylib", NULL);
+    const char *found = g_file_test(in_app, G_FILE_TEST_EXISTS) ? in_app :
+                        g_file_test(beside, G_FILE_TEST_EXISTS) ? beside : NULL;
+    if (!found) {
+        warn_report("vmware-svga: passthrough-opengl-bridge=on but no "
+                    "libVIMPassthroughOpenGLHost found next to QEMU");
+        return;
+    }
+    g_autofree char *real = realpath(found, NULL);
+    g_autofree char *service = g_strdup_printf("com.utmapp.vim.ram.%d", getpid());
+    setenv("VIM_PASSTHROUGH_OPENGL_INPROCESS_LIBRARY", real ? real : found, 1);
+    setenv("VIM_PASSTHROUGH_OPENGL_INLINE", "1", 0);
+    setenv("VIM_PASSTHROUGH_OPENGL_SURFACE_IMPORT", "1", 0);
+    /* VirtualIntelMac's display cadence: publish on SVGA SYNC, 16 ms tick */
+    setenv("VIM_DISPLAY_EVENT_DRIVEN", "1", 0);
+    setenv("VIM_DISPLAY_REFRESH_MS", "16", 0);
+    setenv("VIM_OPENGL_VRAM_SERVICE", service, 0);
+
+    /*
+     * The executor maps guest VRAM/RAM only when VIM_OPENGL_VRAM_ENDPOINT
+     * names a private plist describing the service (VirtualIntelMac's app
+     * writes it); otherwise it falls back to copied graphics.
+     */
+    if (!getenv("VIM_OPENGL_VRAM_ENDPOINT")) {
+        g_autofree char *dir = g_strdup_printf("%s/vim-%d", g_get_tmp_dir(), getpid());
+        g_autofree char *endpoint = g_build_filename(dir, "vram-endpoint.plist", NULL);
+        g_autofree char *plist = g_strdup_printf(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+            "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" "
+            "\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
+            "<plist version=\"1.0\"><dict>"
+            "<key>Version</key><integer>1</integer>"
+            "<key>Service</key><string>%s</string>"
+            "<key>RendererPID</key><integer>%d</integer>"
+            "<key>ProducerPID</key><integer>%d</integer>"
+            "</dict></plist>\n", getenv("VIM_OPENGL_VRAM_SERVICE"),
+            getpid(), getpid());
+        if (g_mkdir_with_parents(dir, 0700) == 0 && chmod(dir, 0700) == 0 &&
+            g_file_set_contents(endpoint, plist, -1, NULL) &&
+            chmod(endpoint, 0600) == 0) {
+            setenv("VIM_OPENGL_VRAM_ENDPOINT", endpoint, 1);
+        } else {
+            warn_report("vmware-svga: could not write %s; "
+                        "PassthroughOpenGL uses copied graphics", endpoint);
+        }
+    }
+}
+#endif
 
 static void vmsvga_init(DeviceState *dev, struct vmsvga_state_s *s,
                         MemoryRegion *address_space, MemoryRegion *io)
 {
+#ifdef __APPLE__
+    if (s->passthrough_opengl_bridge) {
+        vmsvga_passthrough_opengl_default_env();
+    }
+#endif
+    s->legacy_event_scanout = s->passthrough_opengl_bridge &&
+        g_strcmp0(getenv("VIM_DISPLAY_EVENT_DRIVEN"), "1") == 0;
     s->scratch_size = SVGA_SCRATCH_SIZE;
     s->scratch = g_malloc(s->scratch_size * 4);
 
-    s->vga.con = graphic_console_init(dev, 0, &vmsvga_ops, s);
+    const GraphicHwOps *ops = &vmsvga_ops;
+#ifdef VMSVGA_GPU_DISPLAY
+    /* QEMU owns the executor's display unless the app/launcher supplies an
+     * endpoint (VIM_OPENGL_DISPLAY_ENDPOINT) or another device took it. */
+    bool gpu_display = s->passthrough_opengl_bridge &&
+        getenv("VIM_PASSTHROUGH_OPENGL_INPROCESS_LIBRARY") &&
+        !getenv("VIM_OPENGL_DISPLAY_ENDPOINT") &&
+        !getenv("VIM_OPENGL_DISPLAY_INPROCESS");
+    if (gpu_display) {
+        ops = &vmsvga_gpu_ops;
+    }
+#endif
+    s->vga.con = graphic_console_init(dev, 0, ops, s);
+#ifdef VMSVGA_GPU_DISPLAY
+    if (gpu_display && (s->gpu_display = vmsvga_gpu_display_new(s->vga.con))) {
+        char address[32];
+
+        s->gpu_latest_wins = s->gpu_latest_wins ||
+            g_strcmp0(getenv("VIM_DISPLAY_LATEST_WINS"), "1") == 0;
+        snprintf(address, sizeof(address), "%p",
+                 (void *)vmsvga_gpu_display_port);
+        setenv("VIM_OPENGL_DISPLAY_INPROCESS", address, 1);
+    }
+#endif
 
     s->fifo_size = SVGA_FIFO_SIZE;
     memory_region_init_ram(&s->fifo_ram, NULL, "vmsvga.fifo", s->fifo_size,
@@ -1261,6 +2044,32 @@ static void vmsvga_init(DeviceState *dev, struct vmsvga_state_s *s,
     s->fifo_ptr = memory_region_get_ram_ptr(&s->fifo_ram);
 
     vga_common_init(&s->vga, OBJECT(dev), &error_fatal);
+#ifdef __APPLE__
+    /* Explicit private research opt-in. Publish the original VGA RAMBlock,
+     * not a replacement mapping or a copied shadow. Receiver GL resources
+     * must retain their import until GPU ownership has been released. */
+    const char *memory_service = getenv("VIM_OPENGL_VRAM_SERVICE");
+    const char *renderer_pid = getenv("VIM_OPENGL_RENDERER_PID");
+    bool inprocess = getenv("VIM_PASSTHROUGH_OPENGL_INPROCESS_LIBRARY") != NULL;
+    if (s->passthrough_opengl_bridge && memory_service && (renderer_pid || inprocess)) {
+        char *end = NULL;
+        /* The app cannot know a child PID before spawn. In-process ownership
+         * is exactly this process, not a parent-provided PID or first peer. */
+        long pid = inprocess ? getpid() : strtol(renderer_pid, &end, 10);
+        if ((!inprocess && (!*renderer_pid || *end)) || pid <= 0 || pid > INT_MAX ||
+            !(s->legacy_vram_memory = VIMVRAMMemoryServerStart(memory_service,
+                    pid, s->vga.vram_ptr, s->vga.vram_size))) {
+            error_report("Research VRAM capability could not be exported");
+            if (inprocess) {
+                exit(EXIT_FAILURE);
+            }
+        } else {
+            /* FlatView must include the completed board's ROM/MMIO holes. */
+            s->legacy_ram_ready.notify = vmsvga_legacy_ram_ready;
+            qemu_add_machine_init_done_notifier(&s->legacy_ram_ready);
+        }
+    }
+#endif
     vga_init(&s->vga, OBJECT(dev), address_space, io, true);
     vmstate_register_any(NULL, &vmstate_vga_common, &s->vga);
     s->new_depth = 32;
@@ -1271,6 +2080,12 @@ static uint64_t vmsvga_io_read(void *opaque, hwaddr addr, unsigned size)
     struct vmsvga_state_s *s = opaque;
 
     switch (addr) {
+    case VIM_PANEL_IRQ_STATUS_PORT:
+        return s->passthrough_opengl_bridge && s->legacy_panel_irq_enabled &&
+               s->legacy_panel_generation != s->legacy_panel_ack;
+    case VIM_GL_NOTIFY_STATUS_PORT:
+        return s->passthrough_opengl_bridge && s->passthrough_opengl_notification_irq_enabled &&
+               s->passthrough_opengl_notifications_done != 0;
     case SVGA_IO_MUL * SVGA_INDEX_PORT: return vmsvga_index_read(s, addr);
     case SVGA_IO_MUL * SVGA_VALUE_PORT: return vmsvga_value_read(s, addr);
     case SVGA_IO_MUL * SVGA_BIOS_PORT: return vmsvga_bios_read(s, addr);
@@ -1284,6 +2099,21 @@ static void vmsvga_io_write(void *opaque, hwaddr addr,
     struct vmsvga_state_s *s = opaque;
 
     switch (addr) {
+    case VIM_GL_DOORBELL_PORT:
+        /* Private local research: avoid a separate index-latch CPU exit.
+         * Retain the SAME bounded packet validation, stream ownership and
+         * unlocked-native-wait/reset protection as indexed submissions.
+         * The register latch is untouched, including when input is invalid. */
+        if (s->passthrough_opengl_bridge) {
+            vmsvga_passthrough_opengl(s, data);
+        }
+        break;
+    case VIM_GL_NOTIFY_ENABLE_PORT:
+        if (s->passthrough_opengl_bridge && data <= 1 && vmsvga_gl_backing_notify_available()) {
+            s->passthrough_opengl_notification_irq_enabled = data;
+            vmsvga_legacy_irq_update(s);
+        }
+        break;
     case SVGA_IO_MUL * SVGA_INDEX_PORT:
         vmsvga_index_write(s, addr, data);
         break;
@@ -1314,12 +2144,59 @@ static void pci_vmsvga_realize(PCIDevice *dev, Error **errp)
 {
     struct pci_vmsvga_state_s *s = VMWARE_SVGA(dev);
 
+    /* Guests without HiDPI (Snow Leopard): the same space at scale 1. */
+    if (!s->chip.legacy_panel_hidpi && s->chip.legacy_panel_scale == 2) {
+        s->chip.legacy_panel_width /= 2;
+        s->chip.legacy_panel_height /= 2;
+        s->chip.legacy_panel_scale = 1;
+    }
+    if (!s->chip.legacy_panel_hidpi && s->chip.host_panel_scale == 2) {
+        s->chip.host_panel_width /= 2;
+        s->chip.host_panel_height /= 2;
+        s->chip.host_panel_scale = 1;
+    }
+    if (s->chip.host_panel_width && s->chip.host_panel_scale == 1 &&
+        s->chip.legacy_panel_scale == 1 &&
+        s->chip.host_panel_width <= 2560 && s->chip.host_panel_height <= 1600) {
+        /* It fits the boot panel: no later switch. */
+        s->chip.legacy_panel_width = s->chip.host_panel_width;
+        s->chip.legacy_panel_height = s->chip.host_panel_height;
+        s->chip.host_panel_width = s->chip.host_panel_height = 0;
+    }
+    if (s->chip.host_panel_width &&
+        ((s->chip.host_panel_scale != 1 && s->chip.host_panel_scale != 2) ||
+         s->chip.host_panel_width > SVGA_VIM_LARGE_DIMENSION ||
+         s->chip.host_panel_height > SVGA_VIM_LARGE_DIMENSION)) {
+        error_setg(errp, "Host panel geometry exceeds the large scanout bounds");
+        return;
+    }
+
+    if (s->chip.passthrough_opengl_bridge &&
+        ((s->chip.legacy_panel_scale != 1 && s->chip.legacy_panel_scale != 2) ||
+         s->chip.legacy_panel_width < 640 || s->chip.legacy_panel_width > 2560 ||
+         s->chip.legacy_panel_height < 400 || s->chip.legacy_panel_height > 1600 ||
+         (s->chip.legacy_panel_scale == 2 &&
+          (s->chip.legacy_panel_width < 2048 || s->chip.legacy_panel_height < 1536)))) {
+        error_setg(errp, "Research panel geometry exceeds the qualified framebuffer or HiDPI bounds");
+        return;
+    }
+
     dev->config[PCI_CACHE_LINE_SIZE] = 0x08;
     dev->config[PCI_LATENCY_TIMER] = 0x40;
     dev->config[PCI_INTERRUPT_LINE] = 0xff;          /* End */
+    s->chip.legacy_panel_pci = dev;
+    if (s->chip.passthrough_opengl_bridge) {
+        /* Retain BQL only while accessing device state, never while waiting
+         * on the native renderer. QOM remains an explicit A/B diagnostic. */
+        s->chip.passthrough_opengl_release_bql = true;
+        object_property_add_bool(OBJECT(dev), "x-passthrough-opengl-release-bql",
+                                 vmsvga_passthrough_opengl_get_release_bql,
+                                 vmsvga_passthrough_opengl_set_release_bql);
+        dev->config[PCI_INTERRUPT_PIN] = 1;
+    }
 
     memory_region_init_io(&s->io_bar, OBJECT(dev), &vmsvga_io_ops, &s->chip,
-                          "vmsvga-io", 0x10);
+                          "vmsvga-io", s->chip.passthrough_opengl_bridge ? 0x20 : 0x10);
     memory_region_set_flush_coalesced(&s->io_bar);
     pci_register_bar(dev, 0, PCI_BASE_ADDRESS_SPACE_IO, &s->io_bar);
 
@@ -1332,11 +2209,61 @@ static void pci_vmsvga_realize(PCIDevice *dev, Error **errp)
                      &s->chip.fifo_ram);
 }
 
+static void pci_vmsvga_exit(PCIDevice *dev)
+{
+    struct vmsvga_state_s *s = &VMWARE_SVGA(dev)->chip;
+    /* Drop delivered records before finalization; pending callbacks retain
+     * their QOM owner and reject this epoch when they reach the main loop.
+     * Never cancel a GPU use and call that a completed backing release. */
+    s->legacy_panel_irq_enabled = false;
+    vmsvga_release_old_mode(s);
+    vmsvga_passthrough_opengl_reset(s);
+    if (s->passthrough_opengl_bridge) {
+        pci_set_irq(dev, 0);
+    }
+#ifdef VMSVGA_GPU_DISPLAY
+    if (s->gpu_display) {
+        unsetenv("VIM_OPENGL_DISPLAY_INPROCESS");
+        vmsvga_gpu_display_free(s->gpu_display);
+        s->gpu_display = NULL;
+    }
+#endif
+}
+
 static const Property vga_vmware_properties[] = {
+    DEFINE_PROP_BOOL("passthrough-opengl-bridge", struct pci_vmsvga_state_s,
+                     chip.passthrough_opengl_bridge, false),
+    DEFINE_PROP_UINT16("passthrough-opengl-port", struct pci_vmsvga_state_s,
+                       chip.passthrough_opengl_port, 18091),
+    DEFINE_PROP_UINT32("passthrough-opengl-panel-width", struct pci_vmsvga_state_s,
+                       chip.legacy_panel_width, 1280),
+    DEFINE_PROP_UINT32("passthrough-opengl-panel-height", struct pci_vmsvga_state_s,
+                       chip.legacy_panel_height, 800),
+    DEFINE_PROP_UINT32("passthrough-opengl-ui-scale", struct pci_vmsvga_state_s,
+                       chip.legacy_panel_scale, 1),
+    /* Host display size (pixels): the driver switches to it once it opts into
+     * large scanout. hidpi=off halves scale-2 sizes for guests without HiDPI. */
+    DEFINE_PROP_UINT32("passthrough-opengl-host-width", struct pci_vmsvga_state_s,
+                       chip.host_panel_width, 0),
+    DEFINE_PROP_UINT32("passthrough-opengl-host-height", struct pci_vmsvga_state_s,
+                       chip.host_panel_height, 0),
+    DEFINE_PROP_UINT32("passthrough-opengl-host-scale", struct pci_vmsvga_state_s,
+                       chip.host_panel_scale, 1),
+    DEFINE_PROP_BOOL("passthrough-opengl-hidpi", struct pci_vmsvga_state_s,
+                     chip.legacy_panel_hidpi, true),
     DEFINE_PROP_UINT32("vgamem_mb", struct pci_vmsvga_state_s,
                        chip.vga.vram_size_mb, 16),
     DEFINE_PROP_BOOL("global-vmstate", struct pci_vmsvga_state_s,
                      chip.vga.global_vmstate, false),
+#ifdef VMSVGA_GPU_DISPLAY
+    /* Software updates show again after this long without GPU frames
+     * (captured fullscreen GL, login); 0 keeps VirtualIntelMac's latch. */
+    DEFINE_PROP_UINT32("gpu-software-after-ms", struct pci_vmsvga_state_s,
+                       chip.gpu_software_after_ms, 250),
+    /* The newest update wins, software or GPU (VIM_DISPLAY_LATEST_WINS=1). */
+    DEFINE_PROP_BOOL("gpu-latest-wins", struct pci_vmsvga_state_s,
+                     chip.gpu_latest_wins, false),
+#endif
 };
 
 static void vmsvga_class_init(ObjectClass *klass, void *data)
@@ -1345,6 +2272,7 @@ static void vmsvga_class_init(ObjectClass *klass, void *data)
     PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
 
     k->realize = pci_vmsvga_realize;
+    k->exit = pci_vmsvga_exit;
     k->romfile = "vgabios-vmware.bin";
     k->vendor_id = PCI_VENDOR_ID_VMWARE;
     k->device_id = SVGA_PCI_DEVICE_ID;
@@ -1358,12 +2286,25 @@ static void vmsvga_class_init(ObjectClass *klass, void *data)
     set_bit(DEVICE_CATEGORY_DISPLAY, dc->categories);
 }
 
+static void vmsvga_finalize(Object *obj)
+{
+#ifdef __APPLE__
+    struct pci_vmsvga_state_s *s = VMWARE_SVGA(obj);
+    VIMVRAMMemoryServerStop(s->chip.legacy_vram_memory);
+    VIMVRAMMemoryServerStop(s->chip.legacy_ram_memory);
+    if (s->chip.legacy_ram_ready.notify) {
+        qemu_remove_machine_init_done_notifier(&s->chip.legacy_ram_ready);
+    }
+#endif
+}
+
 static const TypeInfo vmsvga_info = {
     .name          = TYPE_VMWARE_SVGA,
     .parent        = TYPE_PCI_DEVICE,
     .instance_size = sizeof(struct pci_vmsvga_state_s),
+    .instance_finalize = vmsvga_finalize,
     .class_init    = vmsvga_class_init,
-    .interfaces = (InterfaceInfo[]) {
+    .interfaces = (const InterfaceInfo[]) {
         { INTERFACE_CONVENTIONAL_PCI_DEVICE },
         { },
     },

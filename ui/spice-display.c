@@ -22,6 +22,7 @@
 #include "qemu/lockable.h"
 #include "qemu/main-loop.h"
 #include "qemu/option.h"
+#include "qemu/cutils.h"
 #include "qemu/queue.h"
 #include "ui/console.h"
 #include "system/system.h"
@@ -740,11 +741,33 @@ static const QXLInterface dpy_interface = {
     .client_monitors_config  = interface_client_monitors_config,
 };
 
+/*
+ * Event-driven cadence (opt-in, VIM_DISPLAY_EVENT_DRIVEN=1, as VirtualIntelMac
+ * sets it): a gfx update schedules one refresh on the next main-loop
+ * iteration instead of waiting for the listener tick.  The device's own
+ * update path runs inside the refresh and notifies this listener again;
+ * 'refreshing' keeps that from turning into a BH loop.
+ */
+static void spice_event_kick(SimpleSpiceDisplay *ssd)
+{
+    if (ssd->event_driven && !ssd->refreshing) {
+        qemu_bh_schedule(ssd->event_bh);
+    }
+}
+
+static void spice_event_refresh(void *opaque)
+{
+    SimpleSpiceDisplay *ssd = opaque;
+
+    ssd->dcl.ops->dpy_refresh(&ssd->dcl);
+}
+
 static void display_update(DisplayChangeListener *dcl,
                            int x, int y, int w, int h)
 {
     SimpleSpiceDisplay *ssd = container_of(dcl, SimpleSpiceDisplay, dcl);
     qemu_spice_display_update(ssd, x, y, w, h);
+    spice_event_kick(ssd);
 }
 
 static void display_switch(DisplayChangeListener *dcl,
@@ -752,12 +775,16 @@ static void display_switch(DisplayChangeListener *dcl,
 {
     SimpleSpiceDisplay *ssd = container_of(dcl, SimpleSpiceDisplay, dcl);
     qemu_spice_display_switch(ssd, surface);
+    spice_event_kick(ssd);
 }
 
 static void display_refresh(DisplayChangeListener *dcl)
 {
     SimpleSpiceDisplay *ssd = container_of(dcl, SimpleSpiceDisplay, dcl);
+
+    ssd->refreshing = true;
     qemu_spice_display_refresh(ssd);
+    ssd->refreshing = false;
 }
 
 static void display_mouse_set(DisplayChangeListener *dcl,
@@ -1236,7 +1263,9 @@ static void spice_gl_refresh(DisplayChangeListener *dcl)
     }
 
     qemu_spice_gl_make_context_current(NULL, spice_gl_ctx);
+    ssd->refreshing = true;
     graphic_hw_update(dcl->con);
+    ssd->refreshing = false;
     if (ssd->gl_updates && ssd->have_surface) {
         qemu_spice_gl_block(ssd, true);
         glFlush();
@@ -1262,6 +1291,7 @@ static void spice_gl_update(DisplayChangeListener *dcl,
     }
 #endif
     ssd->gl_updates++;
+    spice_event_kick(ssd);
 }
 
 static void spice_gl_switch(DisplayChangeListener *dcl,
@@ -1705,6 +1735,23 @@ static void qemu_spice_display_init_one(QemuConsole *con)
     }
 #endif
     ssd->dcl.con = con;
+
+    /*
+     * VirtualIntelMac's cadence for its PassthroughOpenGL display (both
+     * listener flavours): VIM_DISPLAY_REFRESH_MS sets the listener tick,
+     * VIM_DISPLAY_EVENT_DRIVEN=1 adds a refresh on every gfx update.
+     * Unset, the listener keeps QEMU's default and behaves as before.
+     */
+    const char *refresh_ms = getenv("VIM_DISPLAY_REFRESH_MS");
+    unsigned interval;
+    if (refresh_ms && !qemu_strtoui(refresh_ms, NULL, 10, &interval) &&
+        interval >= 5 && interval <= 1000) {
+        ssd->dcl.update_interval = interval;
+    }
+    if (g_strcmp0(getenv("VIM_DISPLAY_EVENT_DRIVEN"), "1") == 0) {
+        ssd->event_driven = true;
+        ssd->event_bh = qemu_bh_new(spice_event_refresh, ssd);
+    }
 
     ssd->qxl.base.sif = &dpy_interface.base;
     qemu_spice_add_display_interface(&ssd->qxl, con);

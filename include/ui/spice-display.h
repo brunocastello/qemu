@@ -129,6 +129,11 @@ struct SimpleSpiceDisplay {
     int mouse_x, mouse_y;
     QEMUBH *cursor_bh;
 
+    /* VIM_DISPLAY_EVENT_DRIVEN: refresh from a BH on gfx updates (mirrors
+     * VirtualIntelMac's ui/vim-display.c); unused when unset. */
+    QEMUBH *event_bh;
+    bool event_driven, refreshing;
+
 #ifdef HAVE_SPICE_GL
     /* opengl rendering */
     QEMUBH *gl_unblock_bh;

@@ -20,6 +20,16 @@ system_ss.add(when: 'CONFIG_VGA_PCI', if_true: files('vga-pci.c'))
 system_ss.add(when: 'CONFIG_VGA_ISA', if_true: files('vga-isa.c'))
 system_ss.add(when: 'CONFIG_VGA_MMIO', if_true: files('vga-mmio.c'))
 system_ss.add(when: 'CONFIG_VMWARE_VGA', if_true: files('vmware_vga.c'))
+if host_os == 'darwin'
+  # PassthroughOpenGL (VirtualIntelMac): Mach audit trailers on the VRAM/RAM service.
+  system_ss.add(when: 'CONFIG_VMWARE_VGA', if_true: declare_dependency(link_args: ['-lbsm']))
+  # vmware-svga hands the PassthroughOpenGL executor's IOSurface frames to the
+  # console as Metal scanout textures; vmware_vga.c tests CONFIG_VMSVGA_GPU_DISPLAY
+  if metal.found() and iosurface.found()
+    system_ss.add(when: 'CONFIG_VMWARE_VGA', if_true: [
+      files('vmware_vga_gpu.c', 'vmware_vga_metal.m'), metal, iosurface])
+  endif
+endif
 system_ss.add(when: 'CONFIG_BOCHS_DISPLAY', if_true: files('bochs-display.c'))
 
 system_ss.add(when: 'CONFIG_EXYNOS4', if_true: files('exynos4210_fimd.c'))

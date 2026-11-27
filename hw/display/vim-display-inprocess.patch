@@ -1,0 +1,63 @@
+UTM: let QEMU own the display of VirtualIntelMac's PassthroughOpenGL host
+executor in-process (VIM_OPENGL_DISPLAY_INPROCESS), instead of the app's
+endpoint plist + bootstrap service, which UTM's sandboxed QEMU cannot use.
+
+Applies to nfzerox/VirtualIntelMacOnAppleSilicon @2861da9e26 (MIT) with
+`patch -p1`; see hw/display/vmware_vga_gpu.c for the owner side.
+
+--- a/Source/PassthroughOpenGL/direct-display-sender-host.c
++++ b/Source/PassthroughOpenGL/direct-display-sender-host.c
+@@ -39,8 +39,33 @@
+     /* A full wake queue already guarantees the worker will inspect all jobs. */
+     mach_msg(&m,MACH_SEND_MSG|MACH_SEND_TIMEOUT,sizeof(m),0,0,0,0);
+ }
++/* UTM: in-process display owner. A QEMU that loads this executor itself
++ * publishes the address of a mach_port_t (*)(void) in
++ * VIM_OPENGL_DISPLAY_INPROCESS (its export list hides the symbol from dlsym;
++ * same hand-off as VIM_VRAM_INPROCESS_LOOKUP). It returns a new send right to
++ * the owner's receive port, or 0 when it cannot take frames; the endpoint
++ * plist and bootstrap service are not used then. */
++typedef mach_port_t (*DGDisplayInprocessFn)(void);
++static DGDisplayInprocessFn DGDisplayInprocess(void)
++{
++    const char *address=getenv("VIM_OPENGL_DISPLAY_INPROCESS");
++    return address && *address?(DGDisplayInprocessFn)(uintptr_t)strtoull(address,NULL,16):NULL;
++}
++/* Whether this executor may offer direct display presentation at all. */
++static int DGDisplayEndpointOffered(void)
++{
++    DGDisplayInprocessFn inprocess=DGDisplayInprocess();
++    if(inprocess){
++        mach_port_t port=inprocess();
++        if(port)mach_port_deallocate(mach_task_self(),port);
++        return port!=0;
++    }
++    return getenv("VIM_OPENGL_DISPLAY_ENDPOINT")!=NULL;
++}
+ static mach_port_t DGDisplayDestination(void)
+ {
++    DGDisplayInprocessFn inprocess=DGDisplayInprocess();
++    if(inprocess)return inprocess();
+     const char *path=getenv("VIM_OPENGL_DISPLAY_ENDPOINT");if(!path || !*path)return 0;
+     int fd=open(path,O_RDONLY|O_NOFOLLOW|O_CLOEXEC);if(fd<0)return 0;
+     struct stat st;unsigned char bytes[65536];ssize_t used=0;
+--- a/Source/PassthroughOpenGL/passthrough-opengl-host.c
++++ b/Source/PassthroughOpenGL/passthrough-opengl-host.c
+@@ -2191,7 +2191,7 @@
+ #ifdef VIM_BACKING_ASYNC_EXPERIMENT
+             reply.result|=DG_CAP_BACKING_COMPLETION;
+ #endif
+-            if(getenv("VIM_OPENGL_DISPLAY_ENDPOINT"))reply.result|=VIM_GL_SERVICE_CAP_PRESENT; }
++            if(DGDisplayEndpointOffered())reply.result|=VIM_GL_SERVICE_CAP_PRESENT; }
+     }
+     else if(m->op==DG_HELLO) {
+         const char *layout=DGHostString(m,2);
+@@ -2246,7 +2246,7 @@
+             reply.result|=DG_CAP_TEXTURE_3D;
+             reply.result|=DG_CAP_SURFACE_VERSIONS;
+             reply.result|=DG_CAP_SURFACE_VERSION_TEXTURE;
+-            if(getenv("VIM_OPENGL_DISPLAY_ENDPOINT"))reply.result|=DG_CAP_SURFACE_PRESENT_VERSION;
++            if(DGDisplayEndpointOffered())reply.result|=DG_CAP_SURFACE_PRESENT_VERSION;
+             if(DGVRAMAvailable())reply.result|=DG_CAP_VRAM_DRAWABLES|DG_CAP_VRAM_PATCHES;
+             if(dg_ram.address)reply.result|=DG_CAP_RAM_DRAWABLES;
+ #ifdef VIM_VRAM_RENDER_TARGET_EXPERIMENT
