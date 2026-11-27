@@ -80,6 +80,11 @@ typedef struct ATIVGARegs {
     uint32_t src_offset;
     uint32_t src_pitch;
     uint32_t src_tile;
+    /* Radeon: the guest's SRC/DST_PITCH_OFFSET while a GUI_MASTER_CNTL with
+     * the select bit clear has the default in them (restored when it is set) */
+    uint32_t saved_src_offset, saved_src_pitch, saved_src_tile;
+    uint32_t saved_dst_offset, saved_dst_pitch, saved_dst_tile;
+    bool src_saved, dst_saved;
     uint32_t src_x;
     uint32_t src_y;
     uint32_t dst_x;

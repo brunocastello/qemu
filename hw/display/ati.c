@@ -1161,9 +1161,11 @@ static void ati_mm_write_reg(void *opaque, hwaddr addr,
         ati_cursor_define(s);
         break;
     case DST_OFFSET:
+        s->regs.dst_saved = false;
             s->regs.dst_offset = data & 0xfffffff0;
         break;
     case DST_PITCH:
+        s->regs.dst_saved = false;
             s->regs.dst_pitch = data & 0x3fff;
         if (s->dev_id == PCI_DEVICE_ID_ATI_RAGE128_PF) {
             s->regs.dst_tile = (data >> 16) & 1;
@@ -1194,6 +1196,7 @@ static void ati_mm_write_reg(void *opaque, hwaddr addr,
         s->regs.dst_y = data & 0x3fff;
         break;
     case SRC_PITCH_OFFSET:
+        s->regs.src_saved = false;
         if (s->dev_id == PCI_DEVICE_ID_ATI_RAGE128_PF) {
             s->regs.src_offset = (data & 0x1fffff) << 5;
             s->regs.src_pitch = (data & 0x7fe00000) >> 21;
@@ -1205,6 +1208,7 @@ static void ati_mm_write_reg(void *opaque, hwaddr addr,
         }
         break;
     case DST_PITCH_OFFSET:
+        s->regs.dst_saved = false;
         if (s->dev_id == PCI_DEVICE_ID_ATI_RAGE128_PF) {
             s->regs.dst_offset = (data & 0x1fffff) << 5;
             s->regs.dst_pitch = (data & 0x7fe00000) >> 21;
@@ -1234,13 +1238,43 @@ static void ati_mm_write_reg(void *opaque, hwaddr addr,
                               (data & 0x4000) << 16;
         s->regs.dp_mix = (data & GMC_ROP3_MASK) | (data & 0x7000000) >> 16;
 
+        /*
+         * The engine picks the default or SRC/DST_PITCH_OFFSET by these bits.
+         * The registers are overwritten with the default here, but the
+         * guest's own values are kept and restored when a later operation
+         * selects them again without rewriting them: the Mac driver writes
+         * the blit source once, and a fill with the bit clear in between made
+         * the next blit read from the default (the front buffer itself).
+         */
         if (!(data & GMC_SRC_PITCH_OFFSET_CNTL)) {
+            if (ati_is_radeon(s) && !s->regs.src_saved) {
+                s->regs.saved_src_offset = s->regs.src_offset;
+                s->regs.saved_src_pitch = s->regs.src_pitch;
+                s->regs.saved_src_tile = s->regs.src_tile;
+                s->regs.src_saved = true;
+            }
             s->regs.src_offset = s->regs.default_offset;
             s->regs.src_pitch = s->regs.default_pitch;
+        } else if (s->regs.src_saved) {
+            s->regs.src_offset = s->regs.saved_src_offset;
+            s->regs.src_pitch = s->regs.saved_src_pitch;
+            s->regs.src_tile = s->regs.saved_src_tile;
+            s->regs.src_saved = false;
         }
         if (!(data & GMC_DST_PITCH_OFFSET_CNTL)) {
+            if (ati_is_radeon(s) && !s->regs.dst_saved) {
+                s->regs.saved_dst_offset = s->regs.dst_offset;
+                s->regs.saved_dst_pitch = s->regs.dst_pitch;
+                s->regs.saved_dst_tile = s->regs.dst_tile;
+                s->regs.dst_saved = true;
+            }
             s->regs.dst_offset = s->regs.default_offset;
             s->regs.dst_pitch = s->regs.default_pitch;
+        } else if (s->regs.dst_saved) {
+            s->regs.dst_offset = s->regs.saved_dst_offset;
+            s->regs.dst_pitch = s->regs.saved_dst_pitch;
+            s->regs.dst_tile = s->regs.saved_dst_tile;
+            s->regs.dst_saved = false;
         }
         if (!(data & GMC_SRC_CLIPPING)) {
             s->regs.src_sc_right = s->regs.default_sc_right;
@@ -1276,9 +1310,11 @@ static void ati_mm_write_reg(void *opaque, hwaddr addr,
         s->regs.dst_height = (data >> 16) & 0x3fff;
         break;
     case SRC_OFFSET:
+        s->regs.src_saved = false;
             s->regs.src_offset = data & 0xfffffff0;
         break;
     case SRC_PITCH:
+        s->regs.src_saved = false;
             s->regs.src_pitch = data & 0x3fff;
         if (s->dev_id == PCI_DEVICE_ID_ATI_RAGE128_PF) {
             s->regs.src_tile = (data >> 16) & 1;
