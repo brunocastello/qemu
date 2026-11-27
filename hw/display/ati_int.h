@@ -227,6 +227,9 @@ void ati_3d_mode_changed(ATIVGAState *s);
 bool ati_3d_busy(ATIVGAState *s);
 /* the 2D engine wrote VRAM [off, off + len) (VRAM offsets) */
 void ati_3d_vram_written(ATIVGAState *s, uint64_t off, uint64_t len);
+bool ati_3d_track_info(ATIVGAState *s, uint64_t off, uint32_t *fmt,
+                       uint32_t *pitch, uint32_t *w, uint32_t *h,
+                       bool *gl_owned);
 /*
  * A solid 2D fill of the rectangle r (dst offset, pitch and bytes per pixel
  * as the 2D engine has them; filler = the 32-bit VRAM word it would store,

@@ -570,8 +570,32 @@ static bool ati_2d_run(ATIVGAState *s, ATI2DCtx *c, const uint8_t *buf,
             return false;
         }
     }
+    if (ati_is_radeon(s) && c->src_kind == SRC_MEM_COLOR &&
+        trace_event_get_state_backends(TRACE_ATI_2D_SRC)) {
+        uint32_t tf = 0, tp = 0, tw = 0, th = 0;
+        bool go = false, tr;
+
+        tr = ati_3d_track_info(s, (uint64_t)c->src_offset +
+                               (uint64_t)sy * c->src_stride, &tf, &tp, &tw,
+                               &th, &go);
+        trace_ati_2d_src(c->src_offset, c->src_stride, sx, sy,
+                         tr, tf, tp, tw, th, go);
+    }
     if (!ati_2d_fast(c, &vis, sx, sy, s->use_pixman)) {
         ati_2d_generic(c, &vis, sx, sy, buf, buf_stride);
+    }
+    if (ati_is_radeon(s) && c->src_kind == SRC_MEM_COLOR &&
+        trace_event_get_state_backends(TRACE_ATI_2D_SRC_BYTES) &&
+        (uint64_t)c->src_offset + (uint64_t)(sy + 241) * c->src_stride + 8 <=
+        c->vram_size &&
+        (uint64_t)c->dst_offset + (uint64_t)241 * c->dst_stride + 8 <=
+        c->vram_size) {
+        trace_ati_2d_src_bytes(
+            ldq_be_p(c->vram + c->src_offset + (uint64_t)sy * c->src_stride),
+            ldq_be_p(c->vram + c->src_offset +
+                     (uint64_t)(sy + 240) * c->src_stride),
+            ldq_be_p(c->vram + c->dst_offset),
+            ldq_be_p(c->vram + c->dst_offset + (uint64_t)240 * c->dst_stride));
     }
     ati_set_dirty(&s->vga, c, &vis);
     if (ati_is_radeon(s)) {

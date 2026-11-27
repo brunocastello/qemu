@@ -461,6 +461,31 @@ bool ati_3d_busy(ATIVGAState *s)
  * the back buffer every frame: a 4 MB hash per frame at 1920x1080 on the
  * vCPU).  CPU writes are still caught by the hash.
  */
+/* debug: the tracked render target (if any) holding VRAM offset off */
+bool ati_3d_track_info(ATIVGAState *s, uint64_t off, uint32_t *fmt,
+                       uint32_t *pitch, uint32_t *w, uint32_t *h,
+                       bool *gl_owned)
+{
+    ATI3DState *t = s->r3d;
+
+    for (int i = 0; t && t->r && i < MAX_TRACK; i++) {
+        ATITrack *k = &t->track[i];
+        uint64_t o, contig;
+
+        if (k->img.w &&
+            ati_mc_translate(s, k->img.mc, &o, &contig) == ATI_MC_VRAM &&
+            off >= o && off < o + (uint64_t)k->img.pitch * k->img.h) {
+            *fmt = k->img.fmt;
+            *pitch = k->img.pitch;
+            *w = k->img.w;
+            *h = k->img.h;
+            *gl_owned = k->gl_owned;
+            return true;
+        }
+    }
+    return false;
+}
+
 void ati_3d_vram_written(ATIVGAState *s, uint64_t off, uint64_t len)
 {
     ATI3DState *t = s->r3d;
