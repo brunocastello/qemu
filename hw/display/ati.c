@@ -1179,13 +1179,23 @@ static void ati_mm_write_reg(void *opaque, hwaddr addr,
             ati_scanout_range(s, &mc, &len);
             if (ati_3d_flip(s, mc, len)) {
                 s->flip_pending = true;
+                trace_ati_crtc_offset(s->regs.crtc_offset,
+                                      s->regs.crtc_offset_cntl,
+                                      s->vga.vbe_start_addr * 4, true,
+                                      s->mode);
                 break;
             }
         }
         s->flip_pending = false;
         ati_vga_set_offset(&s->vga, s->regs.crtc_offset & 0x07ffffff);
+        trace_ati_crtc_offset(s->regs.crtc_offset, s->regs.crtc_offset_cntl,
+                              s->vga.vbe_start_addr * 4, s->flip_pending,
+                              s->mode);
         break;
     case CRTC_OFFSET_CNTL:
+        trace_ati_crtc_offset(s->regs.crtc_offset, data,
+                              s->vga.vbe_start_addr * 4, s->flip_pending,
+                              s->mode);
         s->regs.crtc_offset_cntl = data; /* FIXME */
         break;
     case CRTC_PITCH:
