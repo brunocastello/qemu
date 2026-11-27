@@ -194,8 +194,20 @@ static void ati_set_dirty(VGACommonState *vga, const ATI2DCtx *ctx,
 
     if (r->width && r->height && end <= vga->vram_size) {
         memory_region_set_dirty(&vga->vram, start, end - start);
-        ati_front_touch(container_of(vga, ATIVGAState, vga), 1, start,
-                        end - start);
+        {
+            ATIVGAState *as = container_of(vga, ATIVGAState, vga);
+            uint32_t before = as->fw_mask;
+
+            ati_front_touch(as, 1, start, end - start);
+            if (!(before & 1) && (as->fw_mask & 1)) {
+                /* first 2D write to the front since the last change log */
+                trace_ati_front_2d(ctx->src_kind, ctx->rop3 >> 16,
+                                   as->regs.dp_gui_master_cntl,
+                                   ctx->src_offset, ctx->src_stride,
+                                   ctx->dst_offset, r->x, r->y, r->width,
+                                   r->height);
+            }
+        }
     }
 }
 

@@ -162,6 +162,7 @@ ati_dac_lut(uint32_t dac_cntl, int bpp, bool loaded, bool applied, uint32_t e0, 
 ati_crtc_offset(uint32_t offset, uint32_t offset_cntl, uint32_t applied_start, bool flip_pending, int mode) "CRTC_OFFSET 0x%08x offset_cntl 0x%08x vga start 0x%x flip_pending %d mode %d"
 ati_front_change(uint64_t start, uint64_t len, uint64_t hash, unsigned writers, unsigned ticks) "front 0x%"PRIx64"+0x%"PRIx64" hash 0x%"PRIx64" writers(1=2D,2=GL landing,0=guest CPU/other) %u over %u vblanks"
 ati_cp_unhandled(unsigned op, unsigned count) "CP packet3 op 0x%02x (%u dwords) not handled"
+ati_front_2d(int src_kind, uint32_t rop, uint32_t gmc, uint32_t src_off, uint32_t src_stride, uint32_t dst_off, int x, int y, int w, int h) "2D write to front: src_kind %d rop 0x%x gmc 0x%08x src 0x%x/%u dst 0x%x at %d,%d %dx%d"
 ati_display_vram(uint64_t start, uint64_t line240) "vram[start] 0x%016"PRIx64" vram[line240] 0x%016"PRIx64
 ati_3d_readback(int async, uint32_t mc, unsigned w, unsigned h, unsigned pitch, unsigned fmt, unsigned swap) "async %d mc 0x%08x %ux%u pitch %u fmt %u swap %u"
 ati_3d_mode_drop(int n) "dropped %d tracked render targets"
