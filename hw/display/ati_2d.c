@@ -571,6 +571,19 @@ static bool ati_2d_run(ATIVGAState *s, ATI2DCtx *c, const uint8_t *buf,
         }
     }
     if (ati_is_radeon(s) && c->src_kind == SRC_MEM_COLOR &&
+        trace_event_get_state_backends(TRACE_ATI_2D_REGS)) {
+        /* the raw source registers, whenever they change */
+        static uint32_t last[6];
+        uint32_t cur[6] = { s->regs.dp_gui_master_cntl, s->regs.src_offset,
+                            s->regs.src_pitch, s->regs.default_offset,
+                            s->regs.dst_offset, s->regs.default_pitch };
+
+        if (memcmp(last, cur, sizeof(cur))) {
+            memcpy(last, cur, sizeof(cur));
+            trace_ati_2d_regs(cur[0], cur[1], cur[2], cur[3], cur[4], cur[5]);
+        }
+    }
+    if (ati_is_radeon(s) && c->src_kind == SRC_MEM_COLOR &&
         trace_event_get_state_backends(TRACE_ATI_2D_SRC)) {
         uint32_t tf = 0, tp = 0, tw = 0, th = 0;
         bool go = false, tr;
@@ -578,8 +591,14 @@ static bool ati_2d_run(ATIVGAState *s, ATI2DCtx *c, const uint8_t *buf,
         tr = ati_3d_track_info(s, (uint64_t)c->src_offset +
                                (uint64_t)sy * c->src_stride, &tf, &tp, &tw,
                                &th, &go);
-        trace_ati_2d_src(c->src_offset, c->src_stride, sx, sy,
-                         tr, tf, tp, tw, th, go);
+        static uint32_t last[3];
+        uint32_t cur[3] = { c->src_offset, c->src_stride, c->dst_offset };
+
+        if (memcmp(last, cur, sizeof(cur))) {   /* on change only */
+            memcpy(last, cur, sizeof(cur));
+            trace_ati_2d_src(c->src_offset, c->src_stride, sx, sy,
+                             tr, tf, tp, tw, th, go);
+        }
     }
     if (!ati_2d_fast(c, &vis, sx, sy, s->use_pixman)) {
         ati_2d_generic(c, &vis, sx, sy, buf, buf_stride);

@@ -168,6 +168,7 @@ ati_cp_ib(uint32_t base, uint32_t ndw) "base 0x%08x dwords %u"
 ati_cp_ring(uint32_t rptr, uint32_t wptr, unsigned n) "rptr %u wptr %u dwords %u"
 ati_2d_packet(uint8_t op, unsigned count) "op 0x%02x count %u"
 ati_2d_packet_data(uint8_t op, unsigned n, uint32_t d0, uint32_t d1, uint32_t d2, uint32_t d3, uint32_t d4, uint32_t d5, uint32_t d6, uint32_t d7) "op 0x%02x n %u: %08x %08x %08x %08x %08x %08x %08x %08x"
+ati_2d_regs(uint32_t gmc, uint32_t src_offset, uint32_t src_pitch, uint32_t def_offset, uint32_t dst_offset, uint32_t def_pitch) "gmc 0x%08x src_offset 0x%x src_pitch %u default_offset 0x%x dst_offset 0x%x default_pitch %u"
 ati_2d_src(uint32_t src_offset, int src_stride, int sx, int sy, bool tracked, int tfmt, int tpitch, int tw, int th, bool gl_owned) "src 0x%x stride %d at (%d,%d) | tracked %d fmt %d pitch %d %dx%d gl_owned %d"
 ati_2d_src_bytes(uint64_t row0, uint64_t row240, uint64_t dst0, uint64_t dst240) "src row0 0x%016"PRIx64" row240 0x%016"PRIx64" -> dst row0 0x%016"PRIx64" row240 0x%016"PRIx64
 ati_2d_op(int bpp, uint32_t rop, int src, int x, int y, int w, int h, uint32_t dst_offset, int pitch) "bpp %d rop 0x%02x src %d (%d,%d) %dx%d dst 0x%x pitch %d"

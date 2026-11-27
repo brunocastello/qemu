@@ -846,9 +846,18 @@ static void decode_texture(ATIVGAState *s, int u, ATITexUnit *tu)
         tu->enabled = false;
         return;
     }
-    trace_ati_3d_tex(u, offs, fmt, filt, w, h,
-                     R(s, PP_TXCBLEND_0 + u * PP_TEX_STRIDE),
-                     R(s, PP_TXABLEND_0 + u * PP_TEX_STRIDE));
+    if (trace_event_get_state_backends(TRACE_ATI_3D_TEX)) {
+        /* only when a unit's texture state changes (it was one line per draw) */
+        static uint32_t last[8][7];
+        uint32_t cur[7] = { offs, fmt, filt, w, h,
+            R(s, PP_TXCBLEND_0 + u * PP_TEX_STRIDE),
+            R(s, PP_TXABLEND_0 + u * PP_TEX_STRIDE) };
+
+        if (u < 8 && memcmp(last[u], cur, sizeof(cur))) {
+            memcpy(last[u], cur, sizeof(cur));
+            trace_ati_3d_tex(u, offs, fmt, filt, w, h, cur[5], cur[6]);
+        }
+    }
     swp = swap_code((fmt >> 26) & 3) ^ swap_code(offs & 3) ^
           aperture_swap(s, bpp * 8);
     tu->img.mc = offs & ~31u;
