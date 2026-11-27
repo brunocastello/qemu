@@ -235,7 +235,7 @@ static void ati_apply_gamma_lut(ATIVGAState *s)
     }
     if (s->lut_loaded && !identity && surface_is_allocated(ds) &&
         surface_bits_per_pixel(ds) == 32) {
-        PixelFormat pf = qemu_pixelformat_from_pixman(ds->format);
+        PixelFormat pf = qemu_pixelformat_from_pixman(pixman_image_get_format(ds->image));
         int w = surface_width(ds), h = surface_height(ds);
         uint8_t *row = surface_data(ds);
 
