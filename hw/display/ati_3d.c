@@ -2371,10 +2371,17 @@ static void clear_zmask(ATIVGAState *s, const uint32_t *d, unsigned n)
     if (n < 2 || !decode_targets(s, &st) || !st.color.w) {
         return;
     }
-    p0 = (uint64_t)d[0] * ZMASK_TILE_PIXELS;
-    p1 = (uint64_t)(d[0] + d[1]) * ZMASK_TILE_PIXELS;
-    y0 = MIN(p0 / st.color.w, 2048);
-    y1 = MIN(DIV_ROUND_UP(p1, st.color.w), 2048);
+    if (d[1] == 0) {
+        /* ATI's OpenGL driver (Quake III, every glClear of depth) sends
+         * first tile 0, tile count 0: the whole surface */
+        y0 = 0;
+        y1 = MIN(st.color.h, 2048);
+    } else {
+        p0 = (uint64_t)d[0] * ZMASK_TILE_PIXELS;
+        p1 = (uint64_t)(d[0] + d[1]) * ZMASK_TILE_PIXELS;
+        y0 = MIN(p0 / st.color.w, 2048);
+        y1 = MIN(DIV_ROUND_UP(p1, st.color.w), 2048);
+    }
     if (y1 <= y0) {
         return;
     }
