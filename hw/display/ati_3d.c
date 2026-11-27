@@ -1035,6 +1035,16 @@ static void decode_texture(ATIVGAState *s, int u, ATITexUnit *tu)
                                    (offs >> 3) & 1, fmt & 31, f);
         }
     }
+    /* ALPHA_IN_MAP (bit 6): without it the sampler returns alpha 1 (the
+     * ATI RAVE engine leaves it clear for 16-bit GWorld textures whose
+     * top bit is not alpha, e.g. Nanosaur's GPS map). */
+    {
+        static int ignore = -1;
+        if (ignore < 0) {
+            ignore = getenv("ATI_R100_IGNORE_ALPHA_IN_MAP") != NULL;
+        }
+        tu->alpha_one = !ignore && !(fmt & (1u << 6));
+    }
     swp = swap_code((fmt >> 26) & 3) ^ swap_code(offs & 3) ^
           aperture_swap(s, bpp * 8);
     tu->img.mc = offs & ~31u;
