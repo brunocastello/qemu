@@ -26,6 +26,7 @@
  */
 
 #include "qemu/osdep.h"
+#include <math.h>
 #include "qemu/log.h"
 #include "qemu/error-report.h"
 #include "qemu/bswap.h"
