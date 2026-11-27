@@ -23,6 +23,8 @@ system_ss.add(when: 'CONFIG_VMWARE_VGA', if_true: files('vmware_vga.c'))
 if host_os == 'darwin'
   # PassthroughOpenGL (VirtualIntelMac): Mach audit trailers on the VRAM/RAM service.
   system_ss.add(when: 'CONFIG_VMWARE_VGA', if_true: declare_dependency(link_args: ['-lbsm']))
+  # VirtualIntelMac's Mojave OpenGL command transport (PCI 1b36:10f0, no display)
+  system_ss.add(when: 'CONFIG_VMWARE_VGA', if_true: files('vim-gl-headless.c'))
   # vmware-svga hands the PassthroughOpenGL executor's IOSurface frames to the
   # console as Metal scanout textures; vmware_vga.c tests CONFIG_VMSVGA_GPU_DISPLAY
   if metal.found() and iosurface.found()
