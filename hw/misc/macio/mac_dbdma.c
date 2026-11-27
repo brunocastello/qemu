@@ -45,7 +45,6 @@
 #include "qemu/module.h"
 #include "qemu/log.h"
 #include "system/dma.h"
-#include "hw/core/cpu.h"
 
 /* debug DBDMA */
 #define DEBUG_DBDMA 0
@@ -619,7 +618,8 @@ static void dbdma_control_write(DBDMA_channel *ch)
      * logic to ensure all cases are covered.
      */
 
-    /* The device status bits s0-s7 can be set and cleared by SW (or by
+    /*
+     * The device status bits s0-s7 can be set and cleared by SW (or by
      * the device); they are tested by the interrupt, branch and wait
      * conditions of the channel program.
      */
@@ -899,31 +899,6 @@ static void mac_dbdma_reset(DeviceState *d)
     }
 }
 
-/*
- * The first time the guest runs a DMA program on a channel no device owns,
- * also log the guest CPU state (the code that started it): these accesses
- * precede Mac OS 9's intermittent "Apple Audio Extension" startup crash.
- */
-static void dbdma_unassigned_cpu_state(DBDMA_channel *ch)
-{
-    static uint32_t logged;
-
-    if (logged & (1u << ch->channel)) {
-        return;
-    }
-    logged |= 1u << ch->channel;
-    if (current_cpu && qemu_loglevel_mask(LOG_GUEST_ERROR)) {
-        FILE *f = qemu_log_trylock();
-
-        if (f) {
-            fprintf(f, "dbdma: guest CPU state at first use of unassigned "
-                    "channel %d:\n", ch->channel);
-            cpu_dump_state(current_cpu, f, 0);
-            qemu_log_unlock(f);
-        }
-    }
-}
-
 static void dbdma_unassigned_rw(DBDMA_io *io)
 {
     DBDMA_channel *ch = io->channel;
@@ -931,7 +906,6 @@ static void dbdma_unassigned_rw(DBDMA_io *io)
     uint16_t cmd;
     qemu_log_mask(LOG_GUEST_ERROR, "%s: use of unassigned channel %d\n",
                   __func__, ch->channel);
-    dbdma_unassigned_cpu_state(ch);
     ch->io.processing = false;
 
     cmd = le16_to_cpu(current->command) & COMMAND_MASK;
@@ -948,7 +922,6 @@ static void dbdma_unassigned_flush(DBDMA_io *io)
     DBDMA_channel *ch = io->channel;
     qemu_log_mask(LOG_GUEST_ERROR, "%s: use of unassigned channel %d\n",
                   __func__, ch->channel);
-    dbdma_unassigned_cpu_state(ch);
 }
 
 static void mac_dbdma_init(Object *obj)

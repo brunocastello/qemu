@@ -131,6 +131,8 @@ struct virtio_gpu_base_conf {
     uint32_t flags;
     uint32_t xres;
     uint32_t yres;
+    /* mHz, used when the display reports none */
+    uint32_t refresh_rate;
     uint64_t hostmem;
 };
 
@@ -176,6 +178,14 @@ struct VirtIOGPUBase {
     int enable;
 
     MemoryRegion hostmem;
+    /*
+     * Lowest-priority RAM behind the blob subregions, enabled from a
+     * guest-initiated reset until the next machine reset (see
+     * virtio_gpu_hostmem_scratch_update()).
+     */
+    MemoryRegion hostmem_scratch;
+    bool hostmem_scratch_init;
+    bool hostmem_scratch_mapped;
 
     struct virtio_gpu_scanout scanout[VIRTIO_GPU_MAX_SCANOUTS];
 
@@ -194,7 +204,8 @@ struct VirtIOGPUBaseClass {
     DEFINE_PROP_BIT("edid", _state, _conf.flags, \
                     VIRTIO_GPU_FLAG_EDID_ENABLED, true), \
     DEFINE_PROP_UINT32("xres", _state, _conf.xres, 1280), \
-    DEFINE_PROP_UINT32("yres", _state, _conf.yres, 800)
+    DEFINE_PROP_UINT32("yres", _state, _conf.yres, 800), \
+    DEFINE_PROP_UINT32("refresh_rate", _state, _conf.refresh_rate, 0)
 
 typedef struct VGPUDMABuf {
     QemuDmaBuf *buf;

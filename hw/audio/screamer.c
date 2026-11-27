@@ -75,25 +75,27 @@ static const char *s_spk = "screamer";
 #define SCREAMER_FIFO_FRAMES 128
 #define SCREAMER_TX_TICK_NS  (1 * SCALE_MS)
 /*
- * If the pacing timer fires late (the host was busy, TCG held the main loop),
- * the time it missed is not lost: a deferred transfer may catch up by up to
- * this many frames, or the codec would run slow against real time and the
- * host backend would underrun.  Idle time never accrues this credit.
- * Catch-up idea from poweremu-qemu's screamer pacing (MIT).
+ * Within a transfer, a late tick may catch up on frames that are already
+ * due, up to this bound so one long host stall cannot drain a guest ring.
  */
-#define SCREAMER_CATCHUP_FRAMES(s) ((s)->rate / 20)         /* 50 ms */
+#define SCREAMER_TX_MAX_CREDIT (2 * SCREAMER_FIFO_FRAMES)
 
-static void screamer_tx_credit_update(ScreamerState *s, uint32_t cap)
+/* Accrue TX credit for the virtual time elapsed, up to @limit frames */
+static void screamer_tx_credit_update(ScreamerState *s, uint32_t limit)
 {
     int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
     uint64_t frames;
 
     if (now <= s->tx_last_ns) {
+        /* The virtual clock went back (loadvm): restart the accounting */
+        s->tx_last_ns = now;
         return;
     }
     frames = muldiv64(now - s->tx_last_ns, s->rate, NANOSECONDS_PER_SECOND);
     s->tx_last_ns += muldiv64(frames, NANOSECONDS_PER_SECOND, s->rate);
-    s->tx_credit = MIN(s->tx_credit + frames, cap);
+    if (s->tx_credit < limit) {
+        s->tx_credit = MIN(s->tx_credit + frames, limit);
+    }
 }
 
 /* Copy guest frames into the ring; drop the oldest if the host lags */
@@ -125,12 +127,36 @@ static void screamer_ring_write(ScreamerState *s, hwaddr addr, uint32_t frames)
     }
 }
 
-static void pmac_screamer_tx_transfer(ScreamerState *s, uint32_t cap)
+/* Write back res_count and xfer_status of the current command */
+static void screamer_dma_update_status(DBDMA_channel *ch, uint32_t len)
+{
+    dbdma_cmd *current = &ch->current;
+
+    current->xfer_status = cpu_to_le16(ch->regs[DBDMA_STATUS]);
+    current->res_count = cpu_to_le16(len);
+
+    dma_memory_write(&address_space_memory,
+                     ch->regs[DBDMA_CMDPTR_LO] +
+                     offsetof(dbdma_cmd, res_count),
+                     &current->res_count,
+                     sizeof(current->res_count) +
+                     sizeof(current->xfer_status),
+                     MEMTXATTRS_UNSPECIFIED);
+}
+
+/* Is the flush caused by the guest clearing RUN? */
+static bool screamer_dma_stopping(DBDMA_channel *ch)
+{
+    return ((ch->regs[DBDMA_CONTROL] >> 16) & RUN) &&
+           !(ch->regs[DBDMA_CONTROL] & RUN);
+}
+
+static void pmac_screamer_tx_transfer(ScreamerState *s, uint32_t limit)
 {
     DBDMA_io *io = &s->io;
     uint32_t frames;
 
-    screamer_tx_credit_update(s, cap);
+    screamer_tx_credit_update(s, limit);
     frames = MIN(io->len >> s->shift, s->tx_credit);
 
     if (frames) {
@@ -166,7 +192,7 @@ static void screamer_tx_timer_cb(void *opaque)
 
     if (s->io.len) {
         SCREAMER_DPRINTF("Continue deferred transfer\n");
-        pmac_screamer_tx_transfer(s, SCREAMER_CATCHUP_FRAMES(s));
+        pmac_screamer_tx_transfer(s, SCREAMER_TX_MAX_CREDIT);
     }
 }
 
@@ -178,6 +204,7 @@ static void pmac_screamer_tx(DBDMA_io *io)
                      " len: %x\n", io->addr, io->len);
 
     memcpy(&s->io, io, sizeof(DBDMA_io));
+    /* Time the channel spent idle only fills the FIFO */
     pmac_screamer_tx_transfer(s, SCREAMER_FIFO_FRAMES);
 }
 
@@ -193,42 +220,27 @@ static void pmac_screamer_tx_flush(DBDMA_io *io)
     cmd = le16_to_cpu(current->command) & COMMAND_MASK;
     if (cmd == OUTPUT_MORE || cmd == OUTPUT_LAST ||
         cmd == INPUT_MORE || cmd == INPUT_LAST) {
-        current->xfer_status = cpu_to_le16(ch->regs[DBDMA_STATUS]);
-        current->res_count = cpu_to_le16(io->len);
-
-        dma_memory_write(&address_space_memory,
-                         ch->regs[DBDMA_CMDPTR_LO] +
-                         offsetof(dbdma_cmd, res_count),
-                         &current->res_count,
-                         sizeof(current->res_count) +
-                         sizeof(current->xfer_status),
-                         MEMTXATTRS_UNSPECIFIED);
+        screamer_dma_update_status(ch, io->len);
     }
 #endif
 
-    ch->io.processing = false;
-
-    /* The guest is stopping the channel: abandon any deferred transfer */
-    if (((ch->regs[DBDMA_CONTROL] >> 16) & RUN) &&
-        !(ch->regs[DBDMA_CONTROL] & RUN)) {
+    /*
+     * The guest is stopping the channel: abandon any deferred transfer.
+     * Otherwise (PAUSE, FLUSH) let it finish: it completes through
+     * dma_end, and clearing processing now would make DBDMA restart the
+     * same descriptor and send its frames twice.
+     */
+    if (screamer_dma_stopping(ch)) {
         s->io.len = 0;
+        s->tx_credit = MIN(s->tx_credit, SCREAMER_FIFO_FRAMES);
         timer_del(s->tx_timer);
+        ch->io.processing = false;
     }
 
     cmd = le16_to_cpu(current->command) & COMMAND_MASK;
     if (cmd == INPUT_MORE || cmd == INPUT_LAST) {
-        current->xfer_status = cpu_to_le16(ch->regs[DBDMA_STATUS]);
-        current->res_count = cpu_to_le16(io->len);
-
-            dma_memory_write(&address_space_memory,
-                         ch->regs[DBDMA_CMDPTR_LO] +
-                         offsetof(dbdma_cmd, res_count),
-                         &current->res_count,
-                         sizeof(current->res_count) +
-                         sizeof(current->xfer_status),
-                         MEMTXATTRS_UNSPECIFIED);
+        screamer_dma_update_status(ch, io->len);
     }
-
 }
 
 /*
@@ -241,10 +253,10 @@ static void screamer_rx_timer_cb(void *opaque)
     ScreamerState *s = opaque;
     DBDMA_io *io = &s->rx_io;
 
-    if (!io->len) {
-        return;
-    }
-
+    /*
+     * Only armed for a live transfer (flush and reset delete it); a
+     * zero-length INPUT still has to complete.
+     */
     if (dma_memory_set(&address_space_memory, io->addr, 0, io->len,
                        MEMTXATTRS_UNSPECIFIED) != MEMTX_OK) {
         qemu_log_mask(LOG_GUEST_ERROR,
@@ -279,8 +291,7 @@ static void pmac_screamer_rx_flush(DBDMA_io *io)
     SCREAMER_DPRINTF("DMA RX flush!\n");
 
     /* The guest is stopping the channel: abandon the pending transfer */
-    if (((ch->regs[DBDMA_CONTROL] >> 16) & RUN) &&
-        !(ch->regs[DBDMA_CONTROL] & RUN)) {
+    if (screamer_dma_stopping(ch)) {
         s->rx_io.len = 0;
         timer_del(s->rx_timer);
         ch->io.processing = false;
@@ -288,16 +299,7 @@ static void pmac_screamer_rx_flush(DBDMA_io *io)
 #if 1
     cmd = le16_to_cpu(current->command) & COMMAND_MASK;
     if (cmd == INPUT_MORE || cmd == INPUT_LAST) {
-        current->xfer_status = cpu_to_le16(ch->regs[DBDMA_STATUS]);
-        current->res_count = cpu_to_le16(io->len);
-
-        dma_memory_write(&address_space_memory,
-                         ch->regs[DBDMA_CMDPTR_LO] +
-                         offsetof(dbdma_cmd, res_count),
-                         &current->res_count,
-                         sizeof(current->res_count) +
-                         sizeof(current->xfer_status),
-                         MEMTXATTRS_UNSPECIFIED);
+        screamer_dma_update_status(ch, io->len);
     }
 #endif
 }
