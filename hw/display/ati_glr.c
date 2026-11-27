@@ -1368,10 +1368,61 @@ const char *ati_glr_info(ATIRenderer *r)
     return r->info;
 }
 
+/*
+ * Debug: ATI_R100_DRAWLOG="x0,y0,x1,y1[,max]" logs (qemu_log, -D file) the
+ * state of draws whose vertices all lie inside that window rectangle, at
+ * most max (default 300) of them.
+ */
+static void glr_drawlog(const ATIDrawState *st, uint16_t prim,
+                        const ATIVertex *v, unsigned nv)
+{
+    static int init, left;
+    static float rx0, ry0, rx1, ry1;
+    float z0 = 1e30f, z1 = -1e30f, w0 = 1e30f, w1 = -1e30f;
+    float a0 = 1e30f, a1 = -1e30f, f0 = 1e30f, f1 = -1e30f;
+
+    if (!init) {
+        const char *e = g_getenv("ATI_R100_DRAWLOG");
+        int m = 300;
+        init = 1;
+        if (e && sscanf(e, "%f,%f,%f,%f,%d", &rx0, &ry0, &rx1, &ry1, &m) >= 4) {
+            left = m;
+        }
+    }
+    if (left <= 0 || !nv) {
+        return;
+    }
+    for (unsigned i = 0; i < nv; i++) {
+        if (v[i].x < rx0 || v[i].x > rx1 || v[i].y < ry0 || v[i].y > ry1) {
+            return;
+        }
+        z0 = MIN(z0, v[i].z); z1 = MAX(z1, v[i].z);
+        w0 = MIN(w0, v[i].rhw); w1 = MAX(w1, v[i].rhw);
+        a0 = MIN(a0, v[i].c0[3]); a1 = MAX(a1, v[i].c0[3]);
+        f0 = MIN(f0, v[i].c1[3]); f1 = MAX(f1, v[i].c1[3]);
+    }
+    left--;
+    qemu_log("drawlog prim %u nv %u x %.0f y %.0f z %.4f..%.4f rhw %.4f..%.4f "
+             "a %.2f..%.2f fogf %.2f..%.2f | tcl %d ztest %d zwrite %d zfunc 0x%x "
+             "blend %d 0x%x 0x%x atest %d 0x%x %.2f fog %d src %d col %.2f,%.2f,%.2f "
+             "tex 0x%x stages 0x%x cb0 0x%08x ab0 0x%08x t0 %ux%u fmt %u spec %d "
+             "cmask 0x%x\n",
+             prim, nv, v[0].x, v[0].y, z0, z1, w0, w1, a0, a1, f0, f1,
+             st->tcl, st->z_test, st->z_write, st->z_func, st->blend,
+             st->blend_src, st->blend_dst, st->alpha_test, st->alpha_func,
+             st->alpha_ref, st->fog, st->fog_src, st->fog_color[0],
+             st->fog_color[1], st->fog_color[2], st->tex_enable,
+             st->stage_enable, st->stage[0].cblend, st->stage[0].ablend,
+             st->tex[0].img.w, st->tex[0].img.h, st->tex[0].img.fmt,
+             st->specular, st->color_mask);
+}
+
 void ati_glr_draw(ATIRenderer *r, const ATIDrawState *st, uint16_t prim,
                   const ATIVertex *v, unsigned nv)
 {
     GLRCmd *c = g_new0(GLRCmd, 1);
+
+    glr_drawlog(st, prim, v, nv);
 
     c->kind = CMD_DRAW;
     c->st = *st;
