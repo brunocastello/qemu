@@ -770,6 +770,8 @@ bool ati_3d_range_ready(ATIVGAState *s, uint64_t mc, uint64_t len)
  * later).  2D operations and status reads still read back synchronously
  * (ati_3d_sync).
  */
+static int all_readback = -1;
+
 void ati_3d_sync_range(ATIVGAState *s, uint64_t mc, uint64_t len)
 {
     ATI3DState *t = s->r3d;
@@ -778,6 +780,19 @@ void ati_3d_sync_range(ATIVGAState *s, uint64_t mc, uint64_t len)
         return;
     }
     scanout_read_async(s, mc, len);
+    /*
+     * Mac OS's ATI RAVE presents by copying the GL back buffer to the front
+     * with the CPU through the aperture (no 2D blit, no CRTC flip), so every
+     * target drawn since its last landing is read back, not only the
+     * scanout: the CPU must see current pixels.  ATI_R100_NO_ALL_READBACK=1
+     * restores the scanout-only behaviour (A/B).
+     */
+    if (all_readback < 0) {
+        all_readback = getenv("ATI_R100_NO_ALL_READBACK") ? 0 : 1;
+    }
+    if (all_readback) {
+        scanout_read_async(s, 0, 1ULL << 40);
+    }
 }
 
 static ATITrack *track_acquire(ATIVGAState *s, const ATIImage *img)
