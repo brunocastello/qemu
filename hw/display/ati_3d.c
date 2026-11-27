@@ -1321,6 +1321,20 @@ static void draw(ATIVGAState *s, uint32_t vfmt, uint32_t vfcntl,
     if (!decode_state(s, &st)) {
         return;
     }
+    if (trace_event_get_state_backends(TRACE_ATI_3D_TARGET)) {
+        /* the colour target's raw state, whenever it changes */
+        static uint32_t last[9];
+        uint32_t cur[9] = { R(s, RB3D_COLORPITCH), R(s, RB3D_CNTL),
+                            R(s, RE_WIDTH_HEIGHT), R(s, RE_TOP_LEFT),
+                            R(s, SE_CNTL), R(s, SE_CNTL_STATUS),
+                            st.color.w, st.color.h, st.color.pitch };
+
+        if (memcmp(last, cur, sizeof(cur))) {
+            memcpy(last, cur, sizeof(cur));
+            trace_ati_3d_target(cur[0], cur[1], cur[2], cur[3], cur[4], cur[5],
+                                cur[6], cur[7], cur[8], st.color.fmt);
+        }
+    }
     en = expand_prim(vfcntl & 15, v, n, &ev, &glprim);
     trace_ati_3d_draw(st.color.mc, st.depth_mc, st.z_test, st.z_func, st.z_write,
                       st.blend, st.blend_src, st.blend_dst, vfcntl & 15, n);
