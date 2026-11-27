@@ -1329,7 +1329,10 @@ static bool tcl_matrix(ATI3DState *t, unsigned a, float m[4][4])
  * primitives without VF_CNTL.TCL_ENABLE are window-space, as before.
  * ATI_R100_TCL=off never transforms, =force ignores VF_CNTL.TCL_ENABLE.
  */
-static void tcl_begin(ATIVGAState *s, uint32_t vfcntl, bool allow)
+static unsigned cur_op;        /* packet3 opcode being executed */
+
+static void tcl_begin(ATIVGAState *s, uint32_t vfmt, uint32_t vfcntl,
+                      bool allow)
 {
     ATI3DState *t = s->r3d;
     static int mode = -1;       /* 0 normal, 1 off, 2 force */
@@ -1347,6 +1350,19 @@ static void tcl_begin(ATIVGAState *s, uint32_t vfcntl, bool allow)
     t->tcl_vtx_set = false;
     if (!allow || mode == 1 || (R(s, SE_CNTL_STATUS) & (1 << 8))) {
         return;
+    }
+    {
+        static bool first = true;
+
+        if (first) {
+            first = false;
+            qemu_log_mask(LOG_UNIMP, "ati: first non-bypass draw: packet3 "
+                          "0x%02x vfmt 0x%08x vf_cntl 0x%08x se_cntl_status "
+                          "0x%08x -> %s\n", cur_op, vfmt, vfcntl,
+                          R(s, SE_CNTL_STATUS),
+                          (vfcntl & VFCNTL_TCL_ENABLE) || mode == 2 ?
+                          "TCL transform" : "window space (TCL_ENABLE clear)");
+        }
     }
     if (!(vfcntl & VFCNTL_TCL_ENABLE) && mode != 2) {
         if (!warned_vf) {
@@ -1420,7 +1436,7 @@ static void tcl_begin(ATIVGAState *s, uint32_t vfcntl, bool allow)
             sig = sig * 31 + (uint32_t)tr_i(m[r][c], 4096.0f);
         }
     }
-    if (sig != t->tcl_sig) {
+    if (sig != t->tcl_sig || !t->tcl_dumps) {
         /* the matrix changed: trace it and the first vertices drawn with it */
         t->tcl_sig = sig;
         t->tcl_dump_left = 3;
@@ -1738,7 +1754,7 @@ static void draw_immd(ATIVGAState *s, const uint32_t *d, unsigned n,
     vf = d[1];
     vsz = vtx_dwords(vfmt);
     nv = MIN(vf >> 16, (n - 2) / vsz);
-    tcl_begin(s, vf, tcl_ok);
+    tcl_begin(s, vfmt, vf, tcl_ok);
     v = vbuf(t, nv);
     for (unsigned i = 0; i < nv; i++) {
         decode_vertex(s, vfmt, d + 2 + i * vsz, &v[i], vf & (1 << 6));
@@ -1778,7 +1794,7 @@ static void draw_vbuf(ATIVGAState *s, uint32_t vfmt, uint32_t vf,
         }
         multi = t->narrays > 1 && tot == vsz;
     }
-    tcl_begin(s, vf, true);
+    tcl_begin(s, vfmt, vf, true);
     v = vbuf(t, nv);
     for (unsigned i = 0; i < nv; i++) {
         unsigned vi = idx ? idx[i] : i;
@@ -1856,7 +1872,7 @@ static void draw_membuf(ATIVGAState *s, uint32_t base, uint32_t vfmt,
     for (size_t k = 0; k < ndw; k++) {
         buf[k] = be ? ldl_be_p(&buf[k]) : ldl_le_p(&buf[k]);
     }
-    tcl_begin(s, vf, true);
+    tcl_begin(s, vfmt, vf, true);
     v = vbuf(t, n);
     if (idx && nbuf <= n) {
         if (nbuf > t->dec_cap) {
@@ -1920,15 +1936,16 @@ void ati_3d_packet(ATIVGAState *s, uint8_t op, const uint32_t *d, unsigned n)
 {
     ATI3DState *t = s->r3d;
 
+    cur_op = op;
     trace_ati_3d_packet(op, n, n > 0 ? d[0] : 0, n > 1 ? d[1] : 0);
     if (!t || !t->r) {
         return;
     }
     switch (op) {
     case 0x25:  /* used by ATI's Mac OS RAVE engine like 3D_DRAW_IMMD (same
-                 * vertex format and VF_CNTL words, vertices inline); always
-                 * window-space vertices */
-        draw_immd(s, d, n, false);
+                 * vertex format and VF_CNTL words, vertices inline); RAVE sets
+                 * the TCL bypass bit, which tcl_begin() honours */
+        draw_immd(s, d, n, true);
         break;
     case 0x29:  /* 3D_DRAW_IMMD */
         draw_immd(s, d, n, true);
