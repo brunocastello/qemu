@@ -539,6 +539,41 @@ void ati_flip_settle(ATIVGAState *s)
     }
 }
 
+void ati_front_touch(ATIVGAState *s, unsigned kind, uint64_t off, uint64_t len)
+{
+    uint64_t fs = (uint64_t)s->vga.vbe_start_addr * 4;
+    uint64_t fl = (uint64_t)s->vga.vbe_line_offset *
+                  s->vga.vbe_regs[VBE_DISPI_INDEX_YRES];
+
+    if (s->mode == EXT_MODE && off < fs + fl && fs < off + len) {
+        s->fw_mask |= kind;
+    }
+}
+
+/* front-buffer watch: every 4th vblank, log a change with who wrote it */
+static void ati_front_watch(ATIVGAState *s)
+{
+    uint64_t fs = (uint64_t)s->vga.vbe_start_addr * 4;
+    uint64_t fl = (uint64_t)s->vga.vbe_line_offset *
+                  s->vga.vbe_regs[VBE_DISPI_INDEX_YRES];
+    uint64_t h = 0xcbf29ce484222325ULL;
+
+    if (!trace_event_get_state_backends(TRACE_ATI_FRONT_CHANGE) ||
+        s->mode != EXT_MODE || fs + fl > s->vga.vram_size ||
+        ++s->fw_tick < 4) {
+        return;
+    }
+    for (uint64_t i = 0; i + 8 <= fl; i += 8) {
+        h = (h ^ ldq_le_p(s->vga.vram_ptr + fs + i)) * 0x100000001b3ULL;
+    }
+    if (h != s->fw_hash) {
+        trace_ati_front_change(fs, fl, h, s->fw_mask, s->fw_tick);
+        s->fw_hash = h;
+        s->fw_mask = 0;
+    }
+    s->fw_tick = 0;
+}
+
 static void ati_vga_vblank_irq(void *opaque)
 {
     ATIVGAState *s = opaque;
@@ -557,6 +592,7 @@ static void ati_vga_vblank_irq(void *opaque)
         ati_scanout_range(s, &mc, &len);
         ati_3d_sync_range(s, mc, len);  /* and start the next ones */
     }
+    ati_front_watch(s);
 
     /*
      * RetroBoot: a steady rate.  The next vblank is due a period after this

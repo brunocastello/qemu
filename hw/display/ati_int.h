@@ -173,6 +173,9 @@ struct ATIVGAState {
     uint64_t mode_sig;           /* ati_mode_signature() of the applied mode */
     uint8_t use_pixman;
     bool cursor_guest_mode;
+    uint32_t fw_mask;           /* front-buffer watch: writers since last check */
+    uint64_t fw_hash;
+    unsigned fw_tick;
     bool flip_pending;          /* RetroBoot: display start waits for a readback */
     uint16_t cursor_size;
     uint8_t cursor_mode;
@@ -252,6 +255,8 @@ void ati_scanout_range(ATIVGAState *s, uint64_t *mc, uint64_t *len);
 /* the CRTC runs an extended (non-VGA) mode */
 bool ati_ext_mode(ATIVGAState *s);
 void ati_flip_settle(ATIVGAState *s);
+/* front-buffer watch: kind 1 = 2D op, 2 = GL readback landing */
+void ati_front_touch(ATIVGAState *s, unsigned kind, uint64_t off, uint64_t len);
 const char *ati_3d_stats(ATIVGAState *s);
 const char *ati_3d_gl_info(ATIVGAState *s);
 bool ati_host_data_flush(ATIVGAState *s);

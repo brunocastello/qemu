@@ -194,6 +194,8 @@ static void ati_set_dirty(VGACommonState *vga, const ATI2DCtx *ctx,
 
     if (r->width && r->height && end <= vga->vram_size) {
         memory_region_set_dirty(&vga->vram, start, end - start);
+        ati_front_touch(container_of(vga, ATIVGAState, vga), 1, start,
+                        end - start);
     }
 }
 

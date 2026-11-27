@@ -160,6 +160,8 @@ ati_display_surface(int w, int h, int stride, uint32_t pixman_fmt, bool alloc) "
 ati_display_vga(int bpp, uint32_t line_offset, uint32_t start_addr, bool be, int last_depth, uint16_t vbe_enable) "vga bpp %d line_offset %u start_addr 0x%x be %d last_depth %d vbe_enable 0x%x"
 ati_dac_lut(uint32_t dac_cntl, int bpp, bool loaded, bool applied, uint32_t e0, uint32_t e1, uint32_t emid, uint32_t elast) "dac_cntl 0x%08x bpp %d loaded %d applied %d lut[0] 0x%06x lut[1] 0x%06x lut[128] 0x%06x lut[255] 0x%06x"
 ati_crtc_offset(uint32_t offset, uint32_t offset_cntl, uint32_t applied_start, bool flip_pending, int mode) "CRTC_OFFSET 0x%08x offset_cntl 0x%08x vga start 0x%x flip_pending %d mode %d"
+ati_front_change(uint64_t start, uint64_t len, uint64_t hash, unsigned writers, unsigned ticks) "front 0x%"PRIx64"+0x%"PRIx64" hash 0x%"PRIx64" writers(1=2D,2=GL landing,0=guest CPU/other) %u over %u vblanks"
+ati_cp_unhandled(unsigned op, unsigned count) "CP packet3 op 0x%02x (%u dwords) not handled"
 ati_display_vram(uint64_t start, uint64_t line240) "vram[start] 0x%016"PRIx64" vram[line240] 0x%016"PRIx64
 ati_3d_readback(int async, uint32_t mc, unsigned w, unsigned h, unsigned pitch, unsigned fmt, unsigned swap) "async %d mc 0x%08x %ux%u pitch %u fmt %u swap %u"
 ati_3d_mode_drop(int n) "dropped %d tracked render targets"

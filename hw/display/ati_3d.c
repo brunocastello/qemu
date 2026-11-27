@@ -320,6 +320,7 @@ static void track_land(ATIVGAState *s, ATITrack *k)
         memcpy(s->vga.vram_ptr + off, j->buf, j->len);
         memory_region_set_dirty(&s->vga.vram, off, j->len);
         watch_land(s, off, j->len);
+        ati_front_touch(s, 2, off, j->len);
     } else {
         ati_mc_rw(s, j->img.mc, j->buf, j->len, true);
     }
@@ -386,6 +387,7 @@ static void track_readback(ATIVGAState *s, ATITrack *k)
         g_free(buf);
         memory_region_set_dirty(&s->vga.vram, off, len);
         watch_land(s, off, len);
+        ati_front_touch(s, 2, off, len);
         k->gl_valid = true;
     } else {
         uint8_t *buf = g_malloc(len);
