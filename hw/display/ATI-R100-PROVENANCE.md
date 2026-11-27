@@ -20,6 +20,11 @@ The R100 model (Radeon 7000, PCI 1002:5144) in `ati.c`, `ati_2d.c`,
 License: GPL-2.0-or-later, as QEMU (`ati*.c` by BALATON Zoltan) and the
 upstream patches.  No ATI or Apple binary is included.
 
+## Additions in this tree
+
+- Hardware TCL position transform (`ati_3d.c`, `ati_glr.c`): written from the
+  public Mesa r100 and Linux radeon sources, see `ATI-R100-TCL.md`.
+
 ## Rebase notes (QEMU 11.0.2 -> 10.0 UTM)
 
 The patches apply to QEMU 11.0.2's `hw/display/ati*`, which carry upstream
