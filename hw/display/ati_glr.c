@@ -1369,14 +1369,15 @@ const char *ati_glr_info(ATIRenderer *r)
 }
 
 /*
- * Debug: ATI_R100_DRAWLOG="x0,y0,x1,y1[,max]" logs (qemu_log, -D file) the
+ * Debug: ATI_R100_DRAWLOG="x0,y0,x1,y1[,max[,texw]]" logs (qemu_log, -D file) the
  * state of draws whose vertices all lie inside that window rectangle, at
- * most max (default 300) of them.
+ * most max (default 300) of them; texw: only draws whose unit 0 texture has
+ * that width.
  */
 static void glr_drawlog(const ATIDrawState *st, uint16_t prim,
                         const ATIVertex *v, unsigned nv)
 {
-    static int init, left;
+    static int init, left, texw;
     static float rx0, ry0, rx1, ry1;
     float z0 = 1e30f, z1 = -1e30f, w0 = 1e30f, w1 = -1e30f;
     float a0 = 1e30f, a1 = -1e30f, f0 = 1e30f, f1 = -1e30f;
@@ -1385,11 +1386,11 @@ static void glr_drawlog(const ATIDrawState *st, uint16_t prim,
         const char *e = g_getenv("ATI_R100_DRAWLOG");
         int m = 300;
         init = 1;
-        if (e && sscanf(e, "%f,%f,%f,%f,%d", &rx0, &ry0, &rx1, &ry1, &m) >= 4) {
+        if (e && sscanf(e, "%f,%f,%f,%f,%d,%d", &rx0, &ry0, &rx1, &ry1, &m, &texw) >= 4) {
             left = m;
         }
     }
-    if (left <= 0 || !nv) {
+    if (left <= 0 || !nv || (texw && st->tex[0].img.w != texw)) {
         return;
     }
     for (unsigned i = 0; i < nv; i++) {
