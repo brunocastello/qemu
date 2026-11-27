@@ -791,6 +791,19 @@ static bool main_loop_should_exit(int *status)
             } else if (request == SHUTDOWN_CAUSE_GUEST_PANIC &&
                 panic_action == PANIC_ACTION_EXIT_FAILURE) {
                 *status = EXIT_FAILURE;
+            } else if (request == SHUTDOWN_CAUSE_GUEST_RESET ||
+                       request == SHUTDOWN_CAUSE_HOST_QMP_SYSTEM_RESET) {
+                /*
+                 * UTM: with -action reboot=shutdown, a reset ends the
+                 * process; QEMU_REBOOT_EXIT_STATUS tells the launcher that
+                 * the VM wants to start again (as VirtualIntelMac relaunches
+                 * on the SHUTDOWN event's guest-reset reason, which UTM's
+                 * monitor does not pass on).
+                 */
+                const char *reboot = getenv("QEMU_REBOOT_EXIT_STATUS");
+                if (reboot && *reboot) {
+                    *status = atoi(reboot);
+                }
             }
             return true;
         }
