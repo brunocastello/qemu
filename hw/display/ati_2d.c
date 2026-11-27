@@ -600,6 +600,10 @@ static bool ati_2d_run(ATIVGAState *s, ATI2DCtx *c, const uint8_t *buf,
                              tr, tf, tp, tw, th, go);
         }
     }
+    if (ati_is_radeon(s) && c->src_kind == SRC_MEM_COLOR) {
+        ati_3d_watch_present(s, c->src_offset,
+                             (uint64_t)c->src_stride * (sy + vis.height));
+    }
     if (!ati_2d_fast(c, &vis, sx, sy, s->use_pixman)) {
         ati_2d_generic(c, &vis, sx, sy, buf, buf_stride);
     }
@@ -618,6 +622,9 @@ static bool ati_2d_run(ATIVGAState *s, ATI2DCtx *c, const uint8_t *buf,
     }
     ati_set_dirty(&s->vga, c, &vis);
     if (ati_is_radeon(s)) {
+        ati_3d_watch_2d(s, c->dst_offset + (uint64_t)vis.y * c->dst_stride,
+                        (uint64_t)vis.height * c->dst_stride, c->rop3 >> 16,
+                        c->src_kind);
         /* GL's copy of a 3D target here is stale now */
         ati_3d_vram_written(s, c->dst_offset + vis.x * c->bypp +
                                (uint64_t)vis.y * c->dst_stride,

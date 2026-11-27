@@ -121,6 +121,8 @@ typedef struct ATITrack {
     uint64_t gen, read_gen;
 } ATITrack;
 
+static void watch_land(ATIVGAState *s, uint64_t off, uint64_t len);
+
 #define MAX_TRACK 8
 
 typedef struct ATITexCache {
@@ -252,6 +254,7 @@ static void track_land(ATIVGAState *s, ATITrack *k)
     if (in_vram) {
         memcpy(s->vga.vram_ptr + off, j->buf, j->len);
         memory_region_set_dirty(&s->vga.vram, off, j->len);
+        watch_land(s, off, j->len);
     } else {
         ati_mc_rw(s, j->img.mc, j->buf, j->len, true);
     }
@@ -317,6 +320,7 @@ static void track_readback(ATIVGAState *s, ATITrack *k)
         memcpy(s->vga.vram_ptr + off, buf, len);
         g_free(buf);
         memory_region_set_dirty(&s->vga.vram, off, len);
+        watch_land(s, off, len);
         k->gl_valid = true;
     } else {
         uint8_t *buf = g_malloc(len);
@@ -461,6 +465,92 @@ bool ati_3d_busy(ATIVGAState *s)
  * the back buffer every frame: a 4 MB hash per frame at 1920x1080 on the
  * vCPU).  CPU writes are still caught by the hash.
  */
+/*
+ * Debug (ati_watch_*): did anything but the 3D readback write a render target
+ * in VRAM between its readback and the 2D blit that presents it?  A copy of
+ * each landed target is kept and compared at the blit.
+ */
+typedef struct ATIWatch {
+    uint64_t off, len;
+    uint8_t *data;
+    unsigned w2d;               /* 2D operations into it since */
+} ATIWatch;
+static ATIWatch watch[4];
+static unsigned watch_next;
+
+static bool watch_on(void)
+{
+    return trace_event_get_state_backends(TRACE_ATI_WATCH_LAND);
+}
+
+static void watch_land(ATIVGAState *s, uint64_t off, uint64_t len)
+{
+    ATIWatch *w = NULL;
+
+    if (!watch_on() || off + len > s->vga.vram_size) {
+        return;
+    }
+    for (int i = 0; i < 4; i++) {
+        if (watch[i].data && watch[i].off == off) {
+            w = &watch[i];
+        }
+    }
+    if (!w) {
+        w = &watch[watch_next++ & 3];
+    }
+    g_free(w->data);
+    w->off = off;
+    w->len = len;
+    w->w2d = 0;
+    w->data = g_memdup2(s->vga.vram_ptr + off, len);
+    trace_ati_watch_land(off, len);
+}
+
+/* a 2D operation wrote [off, off+len) */
+void ati_3d_watch_2d(ATIVGAState *s, uint64_t off, uint64_t len, int rop,
+                     int src_kind)
+{
+    if (!watch_on()) {
+        return;
+    }
+    for (int i = 0; i < 4; i++) {
+        ATIWatch *w = &watch[i];
+
+        if (w->data && off < w->off + w->len && w->off < off + len &&
+            ++w->w2d <= 4) {
+            trace_ati_watch_2d(w->off, off, len, rop, src_kind, w->w2d);
+        }
+    }
+}
+
+/* a 2D blit reads [off, off+len) as its source: compare with what landed */
+void ati_3d_watch_present(ATIVGAState *s, uint64_t off, uint64_t len)
+{
+    if (!watch_on() || off + len > s->vga.vram_size) {
+        return;
+    }
+    for (int i = 0; i < 4; i++) {
+        ATIWatch *w = &watch[i];
+        uint64_t n, first = ~0ull, bad = 0;
+
+        if (!w->data || w->off != off) {
+            continue;
+        }
+        n = MIN(len, w->len);
+        for (uint64_t k = 0; k + 2 <= n; k += 2) {
+            if (memcmp(w->data + k, s->vga.vram_ptr + off + k, 2)) {
+                if (first == ~0ull) {
+                    first = k;
+                }
+                bad++;
+            }
+        }
+        trace_ati_watch_present(off, len, w->len, first, bad, w->w2d);
+        return;
+    }
+    trace_ati_watch_present(off, len, 0, ~0ull, 0, ~0u);   /* nothing landed */
+}
+
 /* debug: the tracked render target (if any) holding VRAM offset off */
 bool ati_3d_track_info(ATIVGAState *s, uint64_t off, uint32_t *fmt,
                        uint32_t *pitch, uint32_t *w, uint32_t *h,

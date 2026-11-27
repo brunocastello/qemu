@@ -854,6 +854,23 @@ static void ati_mm_write_reg(void *opaque, hwaddr addr,
     if (addr < CUR_OFFSET || addr > CUR_CLR1 || ATI_DEBUG_HW_CURSOR) {
         trace_ati_mm_write(size, addr, ati_reg_name(addr & ~3ULL), data);
     }
+    if (size == 4 && trace_event_get_state_backends(TRACE_ATI_TILE_REG) &&
+        ((addr >= 0xb00 && addr < 0xb80) || addr == CRTC_OFFSET ||
+         addr == CRTC_OFFSET_CNTL || addr == SRC_PITCH_OFFSET ||
+         addr == DST_PITCH_OFFSET || addr == DEFAULT_OFFSET ||
+         addr == DEFAULT_PITCH || addr == DST_TILE || addr == 0x1c24 ||
+         addr == 0x1c28 || addr == 0x1c48 || addr == DST_PITCH_OFFSET_C)) {
+        /* surface/tiling related registers, when the value changes */
+        static uint32_t last[0x1d00 / 4];
+        static bool seen[0x1d00 / 4];
+        unsigned i = addr / 4;
+
+        if (i < ARRAY_SIZE(last) && (!seen[i] || last[i] != (uint32_t)data)) {
+            seen[i] = true;
+            last[i] = data;
+            trace_ati_tile_reg((uint32_t)addr, (uint32_t)data);
+        }
+    }
     if (addr >= MM_DATA + 4 && addr < sizeof(s->regfile)) {
         ati_reg_write_offs(&s->regfile[addr / 4], addr & 3, data, size);
     }

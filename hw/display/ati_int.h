@@ -232,6 +232,9 @@ void ati_3d_mode_changed(ATIVGAState *s);
 bool ati_3d_busy(ATIVGAState *s);
 /* the 2D engine wrote VRAM [off, off + len) (VRAM offsets) */
 void ati_3d_vram_written(ATIVGAState *s, uint64_t off, uint64_t len);
+void ati_3d_watch_2d(ATIVGAState *s, uint64_t off, uint64_t len, int rop,
+                     int src_kind);
+void ati_3d_watch_present(ATIVGAState *s, uint64_t off, uint64_t len);
 bool ati_3d_track_info(ATIVGAState *s, uint64_t off, uint32_t *fmt,
                        uint32_t *pitch, uint32_t *w, uint32_t *h,
                        bool *gl_owned);
