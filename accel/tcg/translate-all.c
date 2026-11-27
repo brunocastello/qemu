@@ -58,6 +58,9 @@
 #include "system/cpu-timers.h"
 #include "system/tcg.h"
 #include "qapi/error.h"
+#ifndef CONFIG_USER_ONLY
+#include "tcg-accel-ops.h"
+#endif
 #include "accel/tcg/cpu-ops.h"
 #include "tb-jmp-cache.h"
 #include "tb-hash.h"
@@ -67,6 +70,16 @@
 #include "internal-target.h"
 #include "tcg/perf.h"
 #include "tcg/insn-start-words.h"
+
+#ifndef CONFIG_USER_ONLY
+/* Set per vCPU thread by PVG_TCG_TSO, see tcg-accel-ops-mttcg.c. */
+static __thread bool host_tso_enabled;
+
+void tcg_host_tso_enabled(void)
+{
+    host_tso_enabled = true;
+}
+#endif
 
 TBContext tb_ctx;
 
@@ -354,6 +367,15 @@ TranslationBlock *tb_gen_code(CPUState *cpu,
     tcg_ctx->guest_mo = TCG_GUEST_DEFAULT_MO;
 #else
     tcg_ctx->guest_mo = TCG_MO_ALL;
+#endif
+#if defined(TARGET_I386) && !defined(CONFIG_USER_ONLY)
+    if (host_tso_enabled) {
+        /*
+         * Hardware supplies x86's implicit ordering. Do not touch explicit
+         * tcg_gen_mb operations, atomics, or slow-path device barriers.
+         */
+        tcg_ctx->guest_mo &= ~(TCG_MO_LD_LD | TCG_MO_LD_ST | TCG_MO_ST_ST);
+    }
 #endif
 
  restart_translate:

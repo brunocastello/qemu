@@ -3310,6 +3310,8 @@ void helper_emms(CPUX86State *env)
     *(uint32_t *)(env->fptags + 4) = 0x01010101;
 }
 
+#include "sse-native.h"
+
 #define SHIFT 0
 #include "ops_sse.h"
 

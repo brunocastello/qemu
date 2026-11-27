@@ -18,5 +18,7 @@ void tcg_cpu_destroy(CPUState *cpu);
 int tcg_cpu_exec(CPUState *cpu);
 void tcg_handle_interrupt(CPUState *cpu, int mask);
 void tcg_cpu_init_cflags(CPUState *cpu, bool parallel);
+/* Local Apple-silicon experiment; call only after OS TSO enable succeeds. */
+void tcg_host_tso_enabled(void);
 
 #endif /* TCG_ACCEL_OPS_H */

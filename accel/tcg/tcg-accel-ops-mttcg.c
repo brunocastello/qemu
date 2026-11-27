@@ -34,6 +34,11 @@
 #include "tcg/startup.h"
 #include "tcg-accel-ops.h"
 #include "tcg-accel-ops-mttcg.h"
+#if defined(__APPLE__) && defined(__aarch64__)
+#include <dlfcn.h>
+#include <mach/mach.h>
+#include "hw/core/cpu.h"
+#endif
 
 typedef struct MttcgForceRcuNotifier {
     Notifier notifier;
@@ -68,6 +73,33 @@ static void *mttcg_cpu_thread_fn(void *arg)
 
     assert(tcg_enabled());
     g_assert(!icount_enabled());
+
+#if defined(__APPLE__) && defined(__aarch64__)
+    /*
+     * PVG_TCG_TSO=1: opt-in and fail closed (derived from VirtualIntelMac).
+     * Every vCPU must enable the kernel-managed thread state before executing
+     * shared translated blocks.  Unlike a raw ACTLR write, the OS restores
+     * this across context switches.  With the host providing x86's implicit
+     * load/store ordering, translation omits the implicit guest barriers.
+     */
+    const char *tso = getenv("PVG_TCG_TSO");
+    if (tso && strcmp(tso, "1") == 0) {
+        if (strcmp(target_name(), "x86_64") && strcmp(target_name(), "i386")) {
+            fprintf(stderr, "TCG hardware TSO experiment requires an x86 target\n");
+            exit(EXIT_FAILURE);
+        }
+        kern_return_t (*enable)(uint32_t) =
+            dlsym(RTLD_DEFAULT, "thread_set_x86_64_compat");
+        kern_return_t result = enable ? enable(1) : KERN_NOT_SUPPORTED;
+        if (result != KERN_SUCCESS) {
+            fprintf(stderr, "TCG hardware TSO unavailable on CPU %d: %d\n",
+                    cpu->cpu_index, result);
+            exit(EXIT_FAILURE);
+        }
+        tcg_host_tso_enabled();
+        fprintf(stderr, "TCG hardware TSO enabled on CPU %d\n", cpu->cpu_index);
+    }
+#endif
 
     rcu_register_thread();
     force_rcu.notifier.notify = mttcg_force_rcu;
