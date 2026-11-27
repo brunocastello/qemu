@@ -937,7 +937,8 @@ static void decode_texture(ATIVGAState *s, int u, ATITexUnit *tu)
         tu->enabled = false;
         return;
     }
-    if (trace_event_get_state_backends(TRACE_ATI_3D_TEX)) {
+    if (trace_event_get_state_backends(TRACE_ATI_3D_TEX) ||
+        trace_event_get_state_backends(TRACE_ATI_3D_TEX_FLAGS)) {
         /* only when a unit's texture state changes (it was one line per draw) */
         static uint32_t last[8][7];
         uint32_t cur[7] = { offs, fmt, filt, w, h,
