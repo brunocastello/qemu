@@ -149,6 +149,9 @@ static void ati_vga_switch_mode(ATIVGAState *s)
             s->vga.big_endian_fb =
                 (s->regs.config_cntl & (APER_0_ENDIAN | APER_1_ENDIAN)) ||
                 (s->regfile[SURFACE_CNTL / 4] & ATI_SURF_AP_SWAP_MASK);
+            if (bpp <= 8) {
+                s->lut_loaded = false;
+            }
             if (s->scan_bpp != bpp || s->scan_stride != stride ||
                 s->scan_w != h || s->scan_h != v) {
                 /* in-flight/tracked 3D targets belong to the old mode */
@@ -198,6 +201,85 @@ static void ati_vga_switch_mode(ATIVGAState *s)
 static const GraphicHwOps *ati_base_ops;
 static GraphicHwOps ati_vga_hw_ops;
 
+/* DAC palette entry as an 8-bit component (the VGA palette keeps raw bytes) */
+static inline uint8_t ati_lut_c(VGACommonState *vga, int i, int c)
+{
+    uint8_t v = vga->palette[i * 3 + c];
+
+    return vga->dac_8bit ? v : (v << 2) | (v >> 4);
+}
+
+/*
+ * Direct-colour scanout: the DAC palette is the gamma ramp (DrawSprocket
+ * gamma fades).  Plain VGA ignores it for >8 bpp, so apply it to the
+ * converted shadow surface.  15/16 bpp components index the LUT at spaced
+ * entries (5 bit: c<<3, 6 bit: c<<2).  Only after the guest loaded a LUT in
+ * a direct-colour mode, so the VGA default palette never darkens a desktop.
+ */
+static void ati_apply_gamma_lut(ATIVGAState *s)
+{
+    VGACommonState *vga = &s->vga;
+    DisplaySurface *ds = qemu_console_surface(vga->con);
+    uint8_t lut[3][256];
+    uint32_t sig_lo = 0, sig_hi = 0;
+    bool identity = true, applied = false;
+    int bpp = s->scan_bpp;
+
+    for (int i = 0; i < 256; i++) {
+        for (int c = 0; c < 3; c++) {
+            lut[c][i] = ati_lut_c(vga, i, c);
+            if (lut[c][i] != i) {
+                identity = false;
+            }
+        }
+    }
+    if (s->lut_loaded && !identity && surface_is_allocated(ds) &&
+        surface_bits_per_pixel(ds) == 32) {
+        PixelFormat pf = qemu_pixelformat_from_pixman(ds->format);
+        int w = surface_width(ds), h = surface_height(ds);
+        uint8_t *row = surface_data(ds);
+
+        for (int y = 0; y < h; y++, row += surface_stride(ds)) {
+            uint32_t *p = (uint32_t *)row;
+
+            for (int x = 0; x < w; x++) {
+                uint32_t px = p[x];
+                unsigned r = (px >> pf.rshift) & 0xff;
+                unsigned g = (px >> pf.gshift) & 0xff;
+                unsigned b = (px >> pf.bshift) & 0xff;
+
+                if (bpp == 15) {
+                    r &= 0xf8; g &= 0xf8; b &= 0xf8;
+                } else if (bpp == 16) {
+                    r &= 0xf8; g &= 0xfc; b &= 0xf8;
+                }
+                px &= ~((0xffu << pf.rshift) | (0xffu << pf.gshift) |
+                        (0xffu << pf.bshift));
+                p[x] = px | ((uint32_t)lut[0][r] << pf.rshift) |
+                       ((uint32_t)lut[1][g] << pf.gshift) |
+                       ((uint32_t)lut[2][b] << pf.bshift);
+            }
+        }
+        dpy_gfx_update_full(vga->con);
+        applied = true;
+    }
+    for (int i = 0; i < 256; i++) {
+        for (int c = 0; c < 3; c++) {
+            sig_lo = sig_lo * 31 + lut[c][i];
+        }
+    }
+    sig_lo ^= s->regs.dac_cntl;
+    sig_hi = (s->lut_loaded ? 1 : 0) | (applied ? 2 : 0) | (bpp << 4);
+    if (((uint64_t)sig_hi << 32 | sig_lo) != s->lut_sig) {
+        s->lut_sig = (uint64_t)sig_hi << 32 | sig_lo;
+        trace_ati_dac_lut(s->regs.dac_cntl, bpp, s->lut_loaded, applied,
+                          lut[0][0] << 16 | lut[1][0] << 8 | lut[2][0],
+                          lut[0][1] << 16 | lut[1][1] << 8 | lut[2][1],
+                          lut[0][128] << 16 | lut[1][128] << 8 | lut[2][128],
+                          lut[0][255] << 16 | lut[1][255] << 8 | lut[2][255]);
+    }
+}
+
 static void ati_vga_gfx_update(void *opaque)
 {
     VGACommonState *vga = opaque;
@@ -218,6 +300,9 @@ static void ati_vga_gfx_update(void *opaque)
         s->vga.last_width = -1;
     }
     ati_base_ops->gfx_update(opaque);
+    if (ati_is_radeon(s) && s->mode == EXT_MODE && s->scan_bpp > 8) {
+        ati_apply_gamma_lut(s);
+    }
     if (trace_event_get_state_backends(TRACE_ATI_DISPLAY_SURFACE) &&
         s->mode == EXT_MODE) {
         /* what the display actually presented, once a second */
@@ -1039,6 +1124,7 @@ static void ati_mm_write_reg(void *opaque, hwaddr addr,
         }
         break;
     case PALETTE_DATA ... PALETTE_DATA + 3:
+        s->lut_loaded = s->mode == EXT_MODE && s->scan_bpp > 8;
         data <<= addr - PALETTE_DATA;
         data = bswap32(data) >> 8;
         vga_ioport_write(&s->vga, VGA_PEL_D, data & 0xff);
@@ -1048,6 +1134,7 @@ static void ati_mm_write_reg(void *opaque, hwaddr addr,
         vga_ioport_write(&s->vga, VGA_PEL_D, data & 0xff);
         break;
     case PALETTE_30_DATA:
+        s->lut_loaded = s->mode == EXT_MODE && s->scan_bpp > 8;
         s->regs.palette[vga_ioport_read(&s->vga, VGA_PEL_IW)] = data;
         vga_ioport_write(&s->vga, VGA_PEL_D, (data >> 22) & 0xff);
         vga_ioport_write(&s->vga, VGA_PEL_D, (data >> 12) & 0xff);

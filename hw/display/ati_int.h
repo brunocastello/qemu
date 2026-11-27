@@ -168,6 +168,8 @@ struct ATIVGAState {
     uint8_t mode;
     uint32_t scan_bpp, scan_stride, scan_h, scan_w;   /* applied scanout */
     int64_t dbg_surface_ns;                           /* ati_display_surface */
+    bool lut_loaded;        /* guest wrote the DAC LUT in a direct-colour mode */
+    uint64_t lut_sig;                                 /* ati_dac_lut trace */
     uint64_t mode_sig;           /* ati_mode_signature() of the applied mode */
     uint8_t use_pixman;
     bool cursor_guest_mode;
