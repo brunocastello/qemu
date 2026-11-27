@@ -1,7 +1,8 @@
 # R100 hardware TCL (transform) in the emulated Radeon
 
-Status: milestone T1 (position transform).  Implemented in `ati_3d.c`
-(`tcl_*`, `decode_vertex`), `ati_glr.c` (vertex shader `tcl` uniform).
+Status: T1 (position transform, rig-verified) and T2..T4 (texture
+matrix/texgen, lighting, fog, user clip planes; not yet rig-verified).
+Implemented in `ati_3d.c` (`tcl_*`, `decode_vertex`), `ati_glr.c` (vertex shader `tcl` uniform).
 
 Mac OS 9's OpenGL renderer (OpenGLRendererATI) draws with the chip's TCL
 unit: `SE_CNTL_STATUS` bit 8 (TCL bypass) is clear and the vertices are in
@@ -118,14 +119,55 @@ path or here: the 3D target is addressed by `RB3D_COLOROFFSET/PITCH` and
 `SE_VPORT_XOFFSET/YOFFSET` (Mesa `radeonUpdateWindow`, with a 0.125 sub-pixel
 bias).  Mesa sets a negative `YSCALE` and `YOFFSET = drawable height`.
 
-## Not emulated yet (logged once with `LOG_UNIMP`)
+## T2..T4 (post-transform stages, `tcl_fx_setup` / `tcl_post`)
 
-* T2: texture matrices and texgen (`SE_TCL_TEXTURE_PROC_CTL`), texture input
-  select (`SE_TCL_OUTPUT_VTX_SEL` nibbles); texcoords pass through.
-* T3: lighting (`SE_TCL_LIGHT_MODEL_CTL` bit 0): the vertex colour is used as
-  is.  Normals are parsed and skipped.
-* T4: fog (`UCP_VERT_BLEND_CTL` fog mode), user clip planes, vertex blending,
-  `FORCE_W_TO_ONE`, two-sided lighting, guard-band adjusts.
+All of it runs on the CPU in `decode_vertex` for TCL draws; the state is read
+once per draw.  Sources: Linux `radeon_reg.h` (register bits, `RADEON_VS_*`
+and `RADEON_SS_*` addresses), Mesa 8.0.5 `radeon_state.c` (`radeonLightfv`,
+`update_light`, `update_global_ambient`, `radeonColorMaterial`,
+`radeonUpdateMaterial`, `radeonFogfv`, `radeonClipPlane`,
+`update_texturematrix`, `radeonUploadTexMatrix`) and `radeon_state_init.c`
+(`lit_emit`, `cmdvec/cmdscl` layout).  Mesa's r100 driver itself does texgen in
+software, so the texgen input codes come from the register header only.
+
+* **Eye space**: `mv` = matrix at `SELECT_0[3:0]`*4, `it` = `SELECT_0[19:16]`
+  (octword i is row i of the inverse transpose).  `LIGHT_MODEL_CTL` bit 1
+  (light in model space) keeps lights/normals in object space.
+* **Texture** (`tcl_texture`): `OUTPUT_VTX_SEL` nibble per unit at 16+4u.
+  Bit 3 clear: pass input texcoord `nibble & 7`.  Bit 3 set ("computed"): input
+  chosen by the `TEXTURE_PROC_CTL` nibble at 16+4u (0..3 texcoord, 4 object,
+  5 eye, 6 eye normal, 7 eye reflection, 8 normalised eye position), then
+  multiplied by the unit's matrix (`SELECT_1` nibble at 16+4u, `TEXMAT_u_ENABLE`
+  = bit 4+u).  The input is (s, t, q-or-1, 1); outputs 0..2 become s, t, q
+  (Mesa swaps matrix rows 2/3 so the third output is q).  Sphere map is not a
+  hardware mode here (OpenGL builds it from reflect input + matrix).
+* **Lighting** (`tcl_light`): GL equations.  Per-light flags (16 bits at
+  `PER_LIGHT_CTL_0 + 4*(l/2)`, shift 16 for odd l): 0 enable, 1 ambient,
+  2 specular, 3 local, 4 spot, 5 dual cone (ignored), 6 range attenuation,
+  7 constant-only attenuation.  Vector state per light l: 64+l ambient,
+  72+l diffuse, 80+l specular (all unmultiplied by the material), 88+l
+  position (local) or direction to light (w=0), 96+l = -spot direction,
+  104+l attenuation (quadratic, linear, constant).  Scalars: 8+l exponent,
+  16+l cos cutoff, 40+l 1/constant attenuation.  Materials are MMIO floats:
+  emissive 0x2210, ambient 0x2220, diffuse 0x2230, specular 0x2240, shininess
+  0x2250.  Global ambient is vector 122, eye vector / rescale factor 124.
+  Material source per term (`LIGHT_MODEL_CTL` bits 16/18/20/22): 0 premultiplied
+  in the light, 1 state, 2 vertex diffuse, 3 vertex specular.  Bit 2 local
+  viewer, 3 normalise, 4 rescale (eye[3]), 5 specular lights, 6 add specular to
+  the diffuse colour (else it goes to c1 rgb).  Alpha = diffuse material alpha.
+* **Fog**: `UCP_VERT_BLEND_CTL` bits 9:8 (1 exp, 2 exp2, 3 linear), bit 10
+  range fog; vector 123 = (R, C, D).  Factor = C + D*z (linear), exp(D*z),
+  exp(D*z*z), z = |eye z| (or eye distance), clamped, written to c1.a, which
+  the raster fog uses when PP_FOG_COLOR selects vertex/specular-alpha fog.
+* **User clip planes**: bits 2..7 enable, planes at vector 116+i, tested in
+  clip space (bit 0), model space (bit 1) or eye space.  Triangle lists and quad
+  lists lose primitives wholly outside one plane; partially clipped primitives
+  are drawn whole (no gl_ClipDistance).  The per-vertex outcode travels in
+  `tc[0][3]` and is cleared before upload.
+
+Not emulated (`LOG_UNIMP` once): vertex blending, two-sided lighting (front
+side only), range-cutoff / specular threshold, dual-cone, guard-band
+adjusts, `FORCE_W_TO_ONE`.
 
 ## Traces
 
@@ -145,3 +187,7 @@ TCL draws `ati_3d_tcl_vtx` (first vertex: object and clip coordinates) and
   whether it loads one array per component or interleaves.
 * The dword position of N0 relative to W0 when blend weights are present
   (blend weights are not parsed).
+* T2..T4 are untested on the rig: matrix slots for texmats, the texgen input
+  codes, scalar addresses 40+l (1/const attenuation), the sign convention of
+  the eye vector (used as (x, y, -z)), and whether ATI's driver uses premultiplied
+  light colours (source 0), which this code treats as "no material factor".

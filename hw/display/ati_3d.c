@@ -119,6 +119,35 @@
 #define TCL_VEC_N               256     /* octwords (4 dwords each) */
 #define TCL_SCAL_N              512     /* dwords */
 #define VFCNTL_TCL_ENABLE       (1u << 9)
+#define TCL_VS_LIGHT_AMBIENT    64      /* + 8 * (0 amb, 1 diff, 2 spec, 3 pos, 4 spot dir, 5 atten) + light */
+#define TCL_VS_UCP              116
+#define TCL_VS_GLOBAL_AMBIENT   122
+#define TCL_VS_FOG_PARAM        123
+#define TCL_VS_EYE_VECTOR       124
+#define TCL_SS_LIGHT_EXPONENT   8       /* + 8 * (0 dcd, 1 exp, 2 cutoff, 3 spec thresh, 4 range, 5 1/const) + light */
+#define SE_TCL_MATERIAL_EMISSIVE 0x2210 /* 4 floats; ambient 0x2220, diffuse 0x2230, specular 0x2240 */
+#define SE_TCL_SHININESS        0x2250
+#define SE_TCL_PER_LIGHT_CTL_0  0x2270
+
+/* per-draw state of the TCL stages after the position transform (T2..T4) */
+typedef struct TCLLight {
+    uint32_t ctl;               /* 16 bit flags from SE_TCL_PER_LIGHT_CTL */
+    float amb[4], dif[4], spec[4], pos[4], spot[4], att[4];
+    float exponent, cutoff, const_inv;
+} TCLLight;
+
+typedef struct TCLFx {
+    bool light, tex;
+    uint8_t ucp, fog;           /* enabled planes; fog mode (0 off) */
+    uint32_t lm, ucp_ctl, vsel, tpc;
+    float mv[4][4], it[4][4];
+    float texm[3][4][4];
+    float plane[6][4];
+    float emis[4], mamb[4], mdif[4], mspec[4], shine, glt[4], eye[4];
+    int nl;
+    TCLLight L[8];
+    float fog_c, fog_d;
+} TCLFx;
 
 /* GL enums used in the draw description (match GLES values) */
 enum {
@@ -179,6 +208,7 @@ struct ATI3DState {
     uint8_t vec_stride, scal_stride, vec_dw;
     bool tcl_on;                      /* this draw goes through the transform */
     float tcl_m[4][4];                /* clip = tcl_m * (x, y, z, w) */
+    TCLFx tx;                         /* lighting / texgen / fog / clip planes */
     uint32_t tcl_sig;                 /* identity of tcl_m, for the traces */
     int tcl_dump_left;                /* draws still to trace after a change */
     unsigned tcl_dumps;               /* matrix traces so far */
@@ -1323,6 +1353,377 @@ static bool tcl_matrix(ATI3DState *t, unsigned a, float m[4][4])
     return nonzero;
 }
 
+static void tcl_vec4(ATI3DState *t, unsigned a, float *o)
+{
+    for (int c = 0; c < 4; c++) {
+        o[c] = fl(t->tcl_vec[(a & (TCL_VEC_N - 1)) * 4 + c]);
+    }
+}
+
+static float tcl_scl(ATI3DState *t, unsigned a)
+{
+    return fl(t->tcl_scal[a & (TCL_SCAL_N - 1)]);
+}
+
+static void reg_vec4(ATIVGAState *s, unsigned reg, float *o)
+{
+    for (int c = 0; c < 4; c++) {
+        o[c] = fl(R(s, reg + 4 * c));
+    }
+}
+
+/*
+ * T2..T4: collect the state the post-transform stages need (see
+ * ATI-R100-TCL.md for the source of each register).  Done once per draw, and
+ * only for the stages that are switched on.
+ */
+static void tcl_fx_setup(ATIVGAState *s, uint32_t tpc, uint32_t lm,
+                         uint32_t ucp, uint32_t sel0, uint32_t sel1)
+{
+    ATI3DState *t = s->r3d;
+    TCLFx *x = &t->tx;
+    static bool w_texin;
+
+    memset(x, 0, sizeof(*x));
+    x->lm = lm;
+    x->ucp_ctl = ucp;
+    x->tpc = tpc;
+    x->vsel = R(s, SE_TCL_OUTPUT_VTX_SEL);
+    x->light = lm & 1;
+    x->fog = (ucp >> 8) & 3;
+    x->ucp = (ucp >> 2) & 0x3f;
+    /* texture: a unit is computed when its output select has bit 3 set */
+    for (int u = 0; u < 3; u++) {
+        unsigned sel = (x->vsel >> (16 + 4 * u)) & 0xf;
+
+        if (sel & 8) {
+            unsigned in = (tpc >> (16 + 4 * u)) & 0xf;
+
+            x->tex = true;
+            if (in > 8 && !w_texin) {
+                w_texin = true;
+                qemu_log_mask(LOG_UNIMP, "ati: TCL texgen input %u unknown "
+                              "(texture proc 0x%08x)\n", in, tpc);
+            }
+            if (tpc & (0x10u << u)) {
+                tcl_matrix(t, ((sel1 >> (16 + 4 * u)) & 0xf) * 4, x->texm[u]);
+            }
+        }
+    }
+    if (x->light || x->fog || x->ucp || x->tex) {
+        /* eye-space matrices */
+        tcl_matrix(t, (sel0 & 0xf) * 4, x->mv);
+        tcl_matrix(t, ((sel0 >> 16) & 0xf) * 4, x->it);
+    }
+    if (x->light) {
+        tcl_vec4(t, TCL_VS_GLOBAL_AMBIENT, x->glt);
+        tcl_vec4(t, TCL_VS_EYE_VECTOR, x->eye);
+        reg_vec4(s, SE_TCL_MATERIAL_EMISSIVE, x->emis);
+        reg_vec4(s, SE_TCL_MATERIAL_EMISSIVE + 0x10, x->mamb);
+        reg_vec4(s, SE_TCL_MATERIAL_EMISSIVE + 0x20, x->mdif);
+        reg_vec4(s, SE_TCL_MATERIAL_EMISSIVE + 0x30, x->mspec);
+        x->shine = fl(R(s, SE_TCL_SHININESS));
+        for (unsigned l = 0; l < 8; l++) {
+            uint32_t ctl = (R(s, SE_TCL_PER_LIGHT_CTL_0 + 4 * (l / 2)) >>
+                            (16 * (l & 1))) & 0xffff;
+            TCLLight *L;
+
+            if (!(ctl & 1)) {
+                continue;
+            }
+            L = &x->L[x->nl++];
+            L->ctl = ctl;
+            tcl_vec4(t, TCL_VS_LIGHT_AMBIENT + l, L->amb);
+            tcl_vec4(t, TCL_VS_LIGHT_AMBIENT + 8 + l, L->dif);
+            tcl_vec4(t, TCL_VS_LIGHT_AMBIENT + 16 + l, L->spec);
+            tcl_vec4(t, TCL_VS_LIGHT_AMBIENT + 24 + l, L->pos);
+            tcl_vec4(t, TCL_VS_LIGHT_AMBIENT + 32 + l, L->spot);
+            tcl_vec4(t, TCL_VS_LIGHT_AMBIENT + 40 + l, L->att);
+            L->exponent = tcl_scl(t, TCL_SS_LIGHT_EXPONENT + l);
+            L->cutoff = tcl_scl(t, TCL_SS_LIGHT_EXPONENT + 8 + l);
+            L->const_inv = tcl_scl(t, TCL_SS_LIGHT_EXPONENT + 32 + l);
+        }
+    }
+    if (x->ucp) {
+        for (int p = 0; p < 6; p++) {
+            tcl_vec4(t, TCL_VS_UCP + p, x->plane[p]);
+        }
+    }
+    if (x->fog) {
+        float f[4];
+
+        tcl_vec4(t, TCL_VS_FOG_PARAM, f);
+        x->fog_c = f[1];
+        x->fog_d = f[2];
+    }
+}
+
+static inline void mat4v(const float m[4][4], const float *v, float *o)
+{
+    for (int r = 0; r < 4; r++) {
+        o[r] = m[r][0] * v[0] + m[r][1] * v[1] + m[r][2] * v[2] +
+               m[r][3] * v[3];
+    }
+}
+
+static inline float dot3(const float *a, const float *b)
+{
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+}
+
+static inline void norm3(float *v)
+{
+    float l = sqrtf(dot3(v, v));
+
+    if (l > 1e-20f) {
+        v[0] /= l; v[1] /= l; v[2] /= l;
+    }
+}
+
+static inline float sat(float v)
+{
+    return v != v ? 0.0f : v < 0.0f ? 0.0f : v > 1.0f ? 1.0f : v;
+}
+
+/* a material colour source: 0 premultiplied into the light, 1 state, 2/3 vertex */
+static void lm_src(unsigned src, const float *state, const float *c0,
+                   const float *c1, float *o)
+{
+    const float *p = src == 1 ? state : src == 2 ? c0 : src == 3 ? c1 : NULL;
+
+    for (int i = 0; i < 4; i++) {
+        o[i] = p ? p[i] : 1.0f;
+    }
+}
+
+/*
+ * T2: texture matrices and texgen.  Output unit u is either an input
+ * texcoord (select 0..3) or, with bit 3 set, the generated vector
+ * (TEXGEN input: 0..3 texcoord, 4 object, 5 eye, 6 eye normal, 7 reflection,
+ * 8 normalised eye) run through the unit's texture matrix when
+ * TEXMAT_u_ENABLE.  Inputs without a q default to (s, t, 1, 1).
+ */
+static void tcl_texture(const TCLFx *x, ATIVertex *v, const float tin[3][4],
+                        const float *obj, const float *eye, const float *nrm)
+{
+    for (int u = 0; u < 3; u++) {
+        unsigned sel = (x->vsel >> (16 + 4 * u)) & 0xf;
+        float in[4], o[4];
+
+        if (!(sel & 8)) {
+            if ((sel & 7) < 3 && (sel & 7) != (unsigned)u) {
+                memcpy(v->tc[u], tin[sel & 7], 3 * sizeof(float));
+            }
+            continue;
+        }
+        switch ((x->tpc >> (16 + 4 * u)) & 0xf) {
+        case 4: memcpy(in, obj, sizeof(in)); break;
+        case 5: memcpy(in, eye, sizeof(in)); break;
+        case 8: memcpy(in, eye, sizeof(in)); norm3(in); in[3] = 1.0f; break;
+        case 6:
+            memcpy(in, nrm, 3 * sizeof(float)); in[3] = 1.0f;
+            break;
+        case 7: {       /* reflect the eye vector about the normal */
+            float e[3] = { eye[0], eye[1], eye[2] }, d;
+
+            norm3(e);
+            d = 2.0f * dot3(e, nrm);
+            for (int i = 0; i < 3; i++) {
+                in[i] = e[i] - d * nrm[i];
+            }
+            in[3] = 1.0f;
+            break;
+        }
+        default:
+            in[0] = tin[(x->tpc >> (16 + 4 * u)) & 3][0];
+            in[1] = tin[(x->tpc >> (16 + 4 * u)) & 3][1];
+            in[2] = tin[(x->tpc >> (16 + 4 * u)) & 3][2];
+            in[3] = 1.0f;
+            break;
+        }
+        if (x->tpc & (0x10u << u)) {
+            mat4v(x->texm[u], in, o);
+        } else {
+            memcpy(o, in, sizeof(o));
+        }
+        v->tc[u][0] = o[0];
+        v->tc[u][1] = o[1];
+        v->tc[u][2] = o[2];
+    }
+}
+
+/* T3: fixed-function lighting; fills v->c0 (and c1 rgb when not combined) */
+static void tcl_light(const TCLFx *x, ATIVertex *v, bool have_n,
+                      const float *pos, const float *n)
+{
+    unsigned es = (x->lm >> 16) & 3, as = (x->lm >> 18) & 3;
+    unsigned ds = (x->lm >> 20) & 3, ss = (x->lm >> 22) & 3;
+    float em[4], am[4], dm[4], sm[4], col[3], spc[3] = { 0, 0, 0 };
+    float vw[3] = { x->eye[0], x->eye[1], -x->eye[2] };
+    bool local_viewer = x->lm & (1 << 2);
+
+    lm_src(es, x->emis, v->c0, v->c1, em);
+    lm_src(as, x->mamb, v->c0, v->c1, am);
+    lm_src(ds, x->mdif, v->c0, v->c1, dm);
+    lm_src(ss, x->mspec, v->c0, v->c1, sm);
+    for (int i = 0; i < 3; i++) {
+        col[i] = (es ? em[i] : 0.0f) + x->glt[i] * am[i];
+    }
+    if (local_viewer) {
+        vw[0] = -pos[0]; vw[1] = -pos[1]; vw[2] = -pos[2];
+        norm3(vw);
+    }
+    for (int l = 0; l < x->nl; l++) {
+        const TCLLight *L = &x->L[l];
+        float lv[3], hv[3], att = 1.0f, spot = 1.0f, nl, d = 0.0f;
+
+        if (L->ctl & 8) {               /* local light */
+            for (int i = 0; i < 3; i++) {
+                lv[i] = L->pos[i] - pos[i];
+            }
+            d = sqrtf(dot3(lv, lv));
+            norm3(lv);
+            if (L->ctl & 0x40) {        /* range attenuation */
+                att = (L->ctl & 0x80) ? L->const_inv :
+                      1.0f / (L->att[2] + L->att[1] * d + L->att[0] * d * d);
+            }
+            if (L->ctl & 0x10) {        /* spot: spot[] = -spot direction */
+                float sd = dot3(lv, L->spot);
+
+                spot = sd < L->cutoff || sd <= 0.0f ? 0.0f :
+                       L->exponent != 0.0f ? powf(sd, L->exponent) : 1.0f;
+            }
+        } else {
+            memcpy(lv, L->pos, sizeof(lv));
+            norm3(lv);
+        }
+        att *= spot;
+        if ((L->ctl & 2)) {
+            for (int i = 0; i < 3; i++) {
+                col[i] += att * L->amb[i] * am[i];
+            }
+        }
+        if (!have_n) {
+            continue;
+        }
+        nl = dot3(n, lv);
+        if (nl <= 0.0f) {
+            continue;
+        }
+        for (int i = 0; i < 3; i++) {
+            col[i] += att * nl * L->dif[i] * dm[i];
+        }
+        if ((x->lm & 0x20) && (L->ctl & 4)) {
+            float nh, sp;
+
+            for (int i = 0; i < 3; i++) {
+                hv[i] = lv[i] + vw[i];
+            }
+            norm3(hv);
+            nh = dot3(n, hv);
+            if (nh > 0.0f) {
+                sp = x->shine == 0.0f ? 1.0f : powf(nh, x->shine);
+                for (int i = 0; i < 3; i++) {
+                    spc[i] += att * sp * L->spec[i] * sm[i];
+                }
+            }
+        }
+    }
+    if (x->lm & 0x40) {         /* DIFFUSE_SPECULAR_COMBINE */
+        for (int i = 0; i < 3; i++) {
+            col[i] += spc[i];
+            spc[i] = 0.0f;
+        }
+    }
+    for (int i = 0; i < 3; i++) {
+        v->c0[i] = sat(col[i]);
+        v->c1[i] = sat(spc[i]);
+    }
+    v->c0[3] = sat(dm[3]);
+}
+
+/*
+ * Everything after the position transform for one vertex: eye space,
+ * texgen/texmat, lighting, fog and the user clip plane outcode (kept in
+ * tc[0][3] until draw() has dropped the triangles outside a plane).
+ */
+static void tcl_post(ATI3DState *t, ATIVertex *v, uint32_t f,
+                     const float *obj, const float *nrm, const float *clip,
+                     const float tin[3][4])
+{
+    const TCLFx *x = &t->tx;
+    float eye[4] = { obj[0], obj[1], obj[2], obj[3] };
+    float n[3] = { nrm[0], nrm[1], nrm[2] }, lp[3];
+    bool have_n = f & VF_N0;
+
+    if (!(x->light || x->tex || x->fog || x->ucp)) {
+        return;
+    }
+    mat4v(x->mv, obj, eye);
+    if (have_n) {
+        float ne[4], i4[4] = { nrm[0], nrm[1], nrm[2], 0.0f };
+
+        mat4v(x->it, i4, ne);
+        memcpy(n, (x->lm & 2) ? nrm : ne, sizeof(n));
+        if (x->lm & 8) {
+            norm3(n);
+        } else if (x->lm & 16) {
+            for (int i = 0; i < 3; i++) {
+                n[i] *= x->eye[3];
+            }
+        }
+    }
+    if (x->tex) {
+        float ne[3] = { n[0], n[1], n[2] };
+
+        if (x->lm & 2) {    /* texgen wants eye-space normals */
+            float i4[4] = { nrm[0], nrm[1], nrm[2], 0.0f }, o[4];
+
+            mat4v(x->it, i4, o);
+            memcpy(ne, o, sizeof(ne));
+        }
+        norm3(ne);
+        tcl_texture(x, v, tin, obj, eye, ne);
+    }
+    if (x->light) {
+        if (x->lm & 2) {
+            lp[0] = obj[0]; lp[1] = obj[1]; lp[2] = obj[2];
+        } else {
+            lp[0] = eye[0]; lp[1] = eye[1]; lp[2] = eye[2];
+        }
+        tcl_light(x, v, have_n, lp, n);
+    }
+    if (x->fog) {
+        float z = x->ucp_ctl & (1u << 10) ?
+                  sqrtf(eye[0] * eye[0] + eye[1] * eye[1] + eye[2] * eye[2]) :
+                  fabsf(eye[2]);
+        float ff;
+
+        switch (x->fog) {
+        case 1:  ff = expf(x->fog_d * z); break;
+        case 2:  ff = expf(x->fog_d * z * z); break;
+        default: ff = x->fog_c + x->fog_d * z; break;
+        }
+        v->c1[3] = sat(ff);
+    }
+    if (x->ucp) {
+        unsigned out = 0;
+
+        for (int p = 0; p < 6; p++) {
+            const float *pl = x->plane[p];
+            const float *sp = (x->ucp_ctl & 1) ? clip :
+                              (x->ucp_ctl & 2) ? obj : eye;
+
+            if ((x->ucp & (1u << p)) &&
+                pl[0] * sp[0] + pl[1] * sp[1] + pl[2] * sp[2] +
+                pl[3] * sp[3] < 0.0f) {
+                out |= 1u << p;
+            }
+        }
+        v->tc[0][3] = (float)out;
+    }
+}
+
 /*
  * Decide whether the draw about to be decoded goes through the transform
  * and prepare the matrix.  Bypass (SE_CNTL_STATUS bit 8: RAVE) and
@@ -1399,34 +1800,19 @@ static void tcl_begin(ATIVGAState *s, uint32_t vfmt, uint32_t vfcntl,
     tpc = R(s, SE_TCL_TEXTURE_PROC_CTL);
     lm = R(s, SE_TCL_LIGHT_MODEL_CTL);
     ucp = R(s, SE_TCL_UCP_VERT_BLEND_CTL);
+    tcl_fx_setup(s, tpc, lm, ucp, sel0, sel1);
     {
-        static bool w_light, w_tex, w_ucp, w_fog, w_blend;
+        static bool w_blend, w_two;
 
-        if ((lm & 1) && !w_light) {
-            w_light = true;
-            qemu_log_mask(LOG_UNIMP, "ati: TCL lighting not emulated "
-                          "(light model 0x%08x); vertex colours are used as is\n",
-                          lm);
-        }
-        if ((tpc & 0xff) && !w_tex) {
-            w_tex = true;
-            qemu_log_mask(LOG_UNIMP, "ati: TCL texture matrix / texgen not "
-                          "emulated (texture proc 0x%08x); texture "
-                          "coordinates pass through\n", tpc);
-        }
-        if ((ucp & 0xfc) && !w_ucp) {
-            w_ucp = true;
-            qemu_log_mask(LOG_UNIMP, "ati: TCL user clip planes not emulated "
-                          "(0x%08x)\n", ucp);
-        }
-        if ((ucp & (3 << 8)) && !w_fog) {
-            w_fog = true;
-            qemu_log_mask(LOG_UNIMP, "ati: TCL fog not emulated (0x%08x)\n", ucp);
-        }
         if ((ucp & ((1u << 16) | (1u << 17))) && !w_blend) {
             w_blend = true;
             qemu_log_mask(LOG_UNIMP, "ati: TCL vertex blending not emulated "
                           "(0x%08x)\n", ucp);
+        }
+        if ((lm & 1) && (ucp & (1u << 11)) && !w_two) {
+            w_two = true;
+            qemu_log_mask(LOG_UNIMP, "ati: TCL two-sided lighting not "
+                          "emulated (front side only)\n");
         }
     }
 
@@ -1458,7 +1844,7 @@ static void decode_vertex(ATIVGAState *s, uint32_t f, const uint32_t *d,
     uint32_t coord = R(s, SE_COORD_FMT), se = R(s, SE_CNTL);
     bool tcl = s->r3d->tcl_on;
     unsigned i = 0;
-    float w0 = 1.0f;
+    float w0 = 1.0f, nrm[3] = { 0, 0, 1 }, tin[3][4];
 
     memset(v, 0, sizeof(*v));
     v->x = fl(d[i++]);
@@ -1468,8 +1854,9 @@ static void decode_vertex(ATIVGAState *s, uint32_t f, const uint32_t *d,
         w0 = fl(d[i++]);
     }
     if (tcl && (f & VF_N0)) {
-        i += 3;     /* the normal sits between the position and the colours;
-                     * only lighting uses it (not emulated yet) */
+        /* the normal sits between the position and the colours */
+        nrm[0] = fl(d[i]); nrm[1] = fl(d[i + 1]); nrm[2] = fl(d[i + 2]);
+        i += 3;
     }
     v->c0[0] = v->c0[1] = v->c0[2] = v->c0[3] = 1.0f;
     if (f & VF_FPCOLOR) {
@@ -1518,9 +1905,9 @@ static void decode_vertex(ATIVGAState *s, uint32_t f, const uint32_t *d,
             q = fl(d[i++]);
         }
         if (u < 3) {
-            v->tc[u][0] = st0;
-            v->tc[u][1] = st1;
-            v->tc[u][2] = q;
+            v->tc[u][0] = tin[u][0] = st0;
+            v->tc[u][1] = tin[u][1] = st1;
+            v->tc[u][2] = tin[u][2] = q;
         }
     }
     if (tcl) {
@@ -1550,6 +1937,11 @@ static void decode_vertex(ATIVGAState *s, uint32_t f, const uint32_t *d,
             t->tcl_vtx[0] = ox; t->tcl_vtx[1] = oy;
             t->tcl_vtx[2] = oz; t->tcl_vtx[3] = w0;
             memcpy(&t->tcl_vtx[4], c, sizeof(c));
+        }
+        {
+            float obj[4] = { ox, oy, oz, w0 };
+
+            tcl_post(t, v, f, obj, nrm, c, tin);
         }
     } else {
         /* W0 is 1/w unless the coordinate format says otherwise */
@@ -1652,6 +2044,37 @@ static unsigned expand_prim(unsigned type, const ATIVertex *in, unsigned n,
     }
 }
 
+/*
+ * User clip planes (T4): tcl_post() left an outcode per vertex in tc[0][3].
+ * Triangles and quads wholly outside one plane are dropped; primitives that
+ * only cross a plane are drawn unclipped (and other primitive types are not
+ * culled).  The outcodes are cleared again: the shader reads tc[0][3].
+ */
+static unsigned tcl_ucp_cull(unsigned type, ATIVertex *v, unsigned n)
+{
+    unsigned k = 0, g = type == 4 ? 3 : type == 13 ? 4 : 0;
+
+    if (g) {
+        for (unsigned i = 0; i + g <= n; i += g) {
+            unsigned all = ~0u;
+
+            for (unsigned j = 0; j < g; j++) {
+                all &= (unsigned)v[i + j].tc[0][3];
+            }
+            if (!all) {
+                for (unsigned j = 0; j < g; j++) {
+                    v[k++] = v[i + j];
+                }
+            }
+        }
+        n = k;
+    }
+    for (unsigned i = 0; i < n; i++) {
+        v[i].tc[0][3] = 0.0f;
+    }
+    return n;
+}
+
 static void draw(ATIVGAState *s, uint32_t vfmt, uint32_t vfcntl,
                  ATIVertex *v, unsigned n)
 {
@@ -1702,6 +2125,12 @@ static void draw(ATIVGAState *s, uint32_t vfmt, uint32_t vfcntl,
             memcpy(last, cur, sizeof(cur));
             trace_ati_3d_target(cur[0], cur[1], cur[2], cur[3], cur[4], cur[5],
                                 cur[6], cur[7], cur[8], st.color.fmt);
+        }
+    }
+    if (t->tcl_on && t->tx.ucp) {
+        n = tcl_ucp_cull(vfcntl & 15, v, n);
+        if (!n) {
+            return;
         }
     }
     en = expand_prim(vfcntl & 15, v, n, &ev, &glprim);
