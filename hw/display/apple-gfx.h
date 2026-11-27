@@ -21,6 +21,7 @@
 @protocol PGDisplay;
 @protocol MTLDevice;
 @protocol MTLTexture;
+@protocol MTLBuffer;
 @protocol MTLCommandQueue;
 
 typedef QTAILQ_HEAD(, PGTask_s) PGTaskList;
@@ -32,6 +33,8 @@ typedef struct AppleGFXDisplayMode {
 } AppleGFXDisplayMode;
 
 typedef struct AppleGFXState {
+    struct AppleGFXApp *app;
+    struct AppleGFXOOPClient *oop;
     /* Initialised on init/realize() */
     MemoryRegion iomem_gfx;
     id<PGDevice> pgdev;
@@ -50,6 +53,8 @@ typedef struct AppleGFXState {
     QEMUCursor *cursor;
     DisplaySurface *surface;
     id<MTLTexture> texture;
+    id<MTLBuffer> readback_buffer;
+    size_t readback_stride;
     int8_t pending_frames; /* # guest frames in the rendering pipeline */
     bool gfx_update_requested; /* QEMU display system wants a new frame */
     bool new_frame_ready; /* Guest has rendered a frame, ready to be used */
@@ -62,6 +67,7 @@ typedef struct AppleGFXState {
 } AppleGFXState;
 
 void apple_gfx_common_init(Object *obj, AppleGFXState *s, const char* obj_name);
+void apple_gfx_reset(AppleGFXState *s);
 bool apple_gfx_common_realize(AppleGFXState *s, DeviceState *dev,
                               PGDeviceDescriptor *desc, Error **errp);
 void *apple_gfx_host_ptr_for_gpa_range(uint64_t guest_physical,
@@ -71,4 +77,3 @@ void *apple_gfx_host_ptr_for_gpa_range(uint64_t guest_physical,
 extern const PropertyInfo qdev_prop_apple_gfx_display_mode;
 
 #endif
-

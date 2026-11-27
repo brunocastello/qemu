@@ -32,6 +32,13 @@ static const char *apple_gfx_pci_option_rom_path = NULL;
 
 static void apple_gfx_init_option_rom_path(void)
 {
+    const char *donor = getenv("PVG_OOP_DONOR");
+    if (getenv("PVG_OOP_HELPER") && donor) {
+        g_autofree char *directory = g_path_get_dirname(donor);
+        apple_gfx_pci_option_rom_path = g_build_filename(directory, "Resources",
+                                                       "AppleParavirtEFI.rom", NULL);
+        return;
+    }
     NSURL *option_rom_url = PGCopyOptionROMURL();
     const char *option_rom_path = option_rom_url.fileSystemRepresentation;
     apple_gfx_pci_option_rom_path = g_strdup(option_rom_path);
@@ -112,7 +119,7 @@ static void apple_gfx_pci_realize(PCIDevice *dev, Error **errp)
 static void apple_gfx_pci_reset(Object *obj, ResetType type)
 {
     AppleGFXPCIState *s = APPLE_GFX_PCI(obj);
-    [s->common.pgdev reset];
+    apple_gfx_reset(&s->common);
 }
 
 static const Property apple_gfx_pci_properties[] = {
