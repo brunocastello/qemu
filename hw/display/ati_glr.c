@@ -754,6 +754,7 @@ static uint8_t *glr_scratch(ATIRenderer *r, size_t len)
  * Render thread only, except the budget reset.
  */
 static int dump_budget = -1;        /* atomic; -1 = not initialised */
+static int dump_draws = -1;         /* per-draw dumps left, likewise */
 static unsigned dump_count;
 static uint64_t dump_seen[256];
 
@@ -779,10 +780,18 @@ static int dump_limit(void)
     return n ? atoi(n) : 40;
 }
 
+static int dump_draw_limit(void)
+{
+    const char *n = g_getenv("ATI_R100_DUMP_DRAWS");
+
+    return n ? atoi(n) : 30;
+}
+
 void ati_glr_dump_reset(void)
 {
     if (dump_dir()) {
         qatomic_set(&dump_budget, dump_limit());
+        qatomic_set(&dump_draws, dump_draw_limit());
         dump_count = 0;
     }
 }
@@ -841,6 +850,41 @@ static void dump_texture(const ATITexUnit *u, uint64_t key,
                            u->img.swap, (uint32_t)key);
     dump_ppm(name, rgba, u->level_w[0], u->level_h[0]);
     g_free(name);
+}
+
+/* the target after one of the first draws since the mode change (ATI_R100_DUMP_DRAWS) */
+static void dump_draw(ATIRenderer *r, GLRTarget *t, const GLRCmd *c)
+{
+    ATIGL *gl = &r->gl;
+    const ATIDrawState *st = &c->st;
+    unsigned w = t->w, h = MIN((unsigned)st->color.h, t->h);
+    uint8_t *rgba;
+    char *name;
+    static unsigned n;
+
+    if (!dump_dir()) {
+        return;
+    }
+    if (qatomic_read(&dump_draws) < 0) {
+        qatomic_set(&dump_draws, dump_draw_limit());
+    }
+    if (qatomic_read(&dump_draws) <= 0 || !w || !h) {
+        return;
+    }
+    qatomic_dec(&dump_draws);
+    rgba = g_malloc((size_t)w * 4 * h);
+    gl->PixelStorei(GL_PACK_ALIGNMENT, 1);
+    gl->ReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+    name = g_strdup_printf("draw_%04u_mc%08x_prim%u_n%u_sc%d.%d-%d.%d_z%d.%x.%d_"
+                           "bl%d_cm%x_cull%d.%x_tex%x_stg%x.ppm",
+                           n++, st->color.mc, c->prim, c->nv,
+                           st->scissor ? st->sc_x0 : -1, st->sc_y0, st->sc_x1,
+                           st->sc_y1, st->z_test, st->z_func, st->z_write,
+                           st->blend, st->color_mask, st->cull_enable,
+                           st->cull_face, st->tex_enable, st->stage_enable);
+    dump_ppm(name, rgba, w, h);
+    g_free(name);
+    g_free(rgba);
 }
 
 static void glr_upload(ATIRenderer *r, GLRCmd *c)
@@ -1139,6 +1183,7 @@ static void glr_draw(ATIRenderer *r, GLRCmd *c)
     gl->BufferData(GL_ARRAY_BUFFER, c->nv * sizeof(ATIVertex), c->v,
                    GL_STREAM_DRAW);
     gl->DrawArrays(c->prim, 0, c->nv);
+    dump_draw(r, t, c);
 }
 
 /* ---------------------------------------------------------------------
