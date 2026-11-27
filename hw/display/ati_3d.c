@@ -508,7 +508,6 @@ void ati_3d_mode_changed(ATIVGAState *s)
         memset(k, 0, sizeof(*k));
     }
     trace_ati_3d_mode_drop(n);
-    ati_glr_dump_reset();
 }
 
 /* finished asynchronous readbacks into VRAM */
@@ -770,7 +769,6 @@ bool ati_3d_range_ready(ATIVGAState *s, uint64_t mc, uint64_t len)
  * later).  2D operations and status reads still read back synchronously
  * (ati_3d_sync).
  */
-static int all_readback = -1;
 
 void ati_3d_sync_range(ATIVGAState *s, uint64_t mc, uint64_t len)
 {
@@ -784,15 +782,9 @@ void ati_3d_sync_range(ATIVGAState *s, uint64_t mc, uint64_t len)
      * Mac OS's ATI RAVE presents by copying the GL back buffer to the front
      * with the CPU through the aperture (no 2D blit, no CRTC flip), so every
      * target drawn since its last landing is read back, not only the
-     * scanout: the CPU must see current pixels.  ATI_R100_NO_ALL_READBACK=1
-     * restores the scanout-only behaviour (A/B).
+     * scanout: the CPU must see current pixels.
      */
-    if (all_readback < 0) {
-        all_readback = getenv("ATI_R100_NO_ALL_READBACK") ? 0 : 1;
-    }
-    if (all_readback) {
-        scanout_read_async(s, 0, 1ULL << 40);
-    }
+    scanout_read_async(s, 0, 1ULL << 40);
 }
 
 static ATITrack *track_acquire(ATIVGAState *s, const ATIImage *img)
@@ -1038,13 +1030,7 @@ static void decode_texture(ATIVGAState *s, int u, ATITexUnit *tu)
     /* ALPHA_IN_MAP (bit 6): without it the sampler returns alpha 1 (the
      * ATI RAVE engine leaves it clear for 16-bit GWorld textures whose
      * top bit is not alpha, e.g. Nanosaur's GPS map). */
-    {
-        static int ignore = -1;
-        if (ignore < 0) {
-            ignore = getenv("ATI_R100_IGNORE_ALPHA_IN_MAP") != NULL;
-        }
-        tu->alpha_one = !ignore && !(fmt & (1u << 6));
-    }
+    tu->alpha_one = !(fmt & (1u << 6));
     swp = swap_code((fmt >> 26) & 3) ^ swap_code(offs & 3) ^
           aperture_swap(s, bpp * 8);
     tu->img.mc = offs & ~31u;
@@ -1755,7 +1741,6 @@ static void tcl_post(ATI3DState *t, ATIVertex *v, uint32_t f,
  * Decide whether the draw about to be decoded goes through the transform
  * and prepare the matrix.  Bypass (SE_CNTL_STATUS bit 8: RAVE) and
  * primitives without VF_CNTL.TCL_ENABLE are window-space, as before.
- * ATI_R100_TCL=off never transforms, =force ignores VF_CNTL.TCL_ENABLE.
  */
 static unsigned cur_op;        /* packet3 opcode being executed */
 
@@ -1763,20 +1748,15 @@ static void tcl_begin(ATIVGAState *s, uint32_t vfmt, uint32_t vfcntl,
                       bool allow)
 {
     ATI3DState *t = s->r3d;
-    static int mode = -1;       /* 0 normal, 1 off, 2 force */
     static bool warned_vf;
     float m[4][4], mv[4][4], p[4][4];
     uint32_t sel0, sel1, tpc, lm, ucp, sig;
     bool composed = false;
     unsigned mvp_slot, mv_slot;
 
-    if (mode < 0) {
-        const char *e = getenv("ATI_R100_TCL");
-        mode = e && !strcmp(e, "off") ? 1 : e && !strcmp(e, "force") ? 2 : 0;
-    }
     t->tcl_on = false;
     t->tcl_vtx_set = false;
-    if (!allow || mode == 1 || (R(s, SE_CNTL_STATUS) & (1 << 8))) {
+    if (!allow || (R(s, SE_CNTL_STATUS) & (1 << 8))) {
         return;
     }
     {
@@ -1788,17 +1768,16 @@ static void tcl_begin(ATIVGAState *s, uint32_t vfmt, uint32_t vfcntl,
                           "0x%02x vfmt 0x%08x vf_cntl 0x%08x se_cntl_status "
                           "0x%08x -> %s\n", cur_op, vfmt, vfcntl,
                           R(s, SE_CNTL_STATUS),
-                          (vfcntl & VFCNTL_TCL_ENABLE) || mode == 2 ?
+                          (vfcntl & VFCNTL_TCL_ENABLE) ?
                           "TCL transform" : "window space (TCL_ENABLE clear)");
         }
     }
-    if (!(vfcntl & VFCNTL_TCL_ENABLE) && mode != 2) {
+    if (!(vfcntl & VFCNTL_TCL_ENABLE)) {
         if (!warned_vf) {
             warned_vf = true;
             qemu_log_mask(LOG_UNIMP, "ati: TCL not bypassed but the primitive "
                           "has VF_CNTL.TCL_ENABLE clear (0x%x); treating its "
-                          "vertices as window coordinates "
-                          "(ATI_R100_TCL=force overrides)\n", vfcntl);
+                          "vertices as window coordinates\n", vfcntl);
         }
         return;
     }

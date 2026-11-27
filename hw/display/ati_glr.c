@@ -752,160 +752,6 @@ static uint8_t *glr_scratch(ATIRenderer *r, size_t len)
 }
 
 
-/*
- * Debug dump (environment ATI_R100_DUMP=<existing directory>): the first
- * ATI_R100_DUMP_N (default 40) GL framebuffer readbacks after each scanout
- * mode change (rb_NNNN_<w>x<h>_mc<mc>_fmt<f>_swap<s>.ppm, the RGBA the host
- * read, before the guest-format encode, row 0 first), and every newly decoded
- * texture once (tex_mc<mc>_fmt<f>_<w>x<h>_swap<s>_k<key>.ppm, level 0).
- * Render thread only, except the budget reset.
- */
-static int dump_budget = -1;        /* atomic; -1 = not initialised */
-static int dump_draws = -1;         /* per-draw dumps left, likewise */
-static unsigned dump_count;
-static uint64_t dump_seen[256];
-
-static const char *dump_dir(void)
-{
-    static const char *dir;
-    static bool init;
-
-    if (!init) {
-        init = true;
-        dir = g_getenv("ATI_R100_DUMP");
-        if (dir && !*dir) {
-            dir = NULL;
-        }
-    }
-    return dir;
-}
-
-static int dump_limit(void)
-{
-    const char *n = g_getenv("ATI_R100_DUMP_N");
-
-    return n ? atoi(n) : 40;
-}
-
-static int dump_draw_limit(void)
-{
-    const char *n = g_getenv("ATI_R100_DUMP_DRAWS");
-
-    return n ? atoi(n) : 30;
-}
-
-void ati_glr_dump_reset(void)
-{
-    if (dump_dir()) {
-        qatomic_set(&dump_budget, dump_limit());
-        qatomic_set(&dump_draws, dump_draw_limit());
-        dump_count = 0;
-    }
-}
-
-static void dump_ppm(const char *name, const uint8_t *rgba, unsigned w,
-                     unsigned h)
-{
-    char *path = g_strdup_printf("%s/%s", dump_dir(), name);
-    FILE *f = fopen(path, "wb");
-
-    if (f) {
-        fprintf(f, "P6\n%u %u\n255\n", w, h);
-        for (size_t i = 0; i < (size_t)w * h; i++) {
-            fwrite(rgba + 4 * i, 1, 3, f);
-        }
-        fclose(f);
-    } else {
-        qemu_log_mask(LOG_GUEST_ERROR, "ati: cannot write %s\n", path);
-    }
-    g_free(path);
-}
-
-static void dump_readback(const ATIImage *img, const uint8_t *rgba,
-                          unsigned w, unsigned h)
-{
-    char *name;
-
-    if (!dump_dir()) {
-        return;
-    }
-    if (qatomic_read(&dump_budget) < 0) {
-        qatomic_set(&dump_budget, dump_limit());
-    }
-    if (qatomic_read(&dump_budget) <= 0) {
-        return;
-    }
-    qatomic_dec(&dump_budget);
-    name = g_strdup_printf("rb_%04u_%ux%u_mc%08x_fmt%u_swap%u.ppm",
-                           dump_count++, w, h, img->mc, img->fmt, img->swap);
-    dump_ppm(name, rgba, w, h);
-    g_free(name);
-}
-
-static void dump_texture(const ATITexUnit *u, uint64_t key,
-                         const uint8_t *rgba)
-{
-    char *name;
-    unsigned i = (key * 0x9E3779B97F4A7C15ULL) >> 56;
-
-    if (!dump_dir() || dump_seen[i] == key + 1) {
-        return;
-    }
-    dump_seen[i] = key + 1;
-    name = g_strdup_printf("tex_mc%08x_fmt%u_%ux%u_swap%u_k%08x.ppm",
-                           u->img.mc, u->img.fmt, u->img.w, u->img.h,
-                           u->img.swap, (uint32_t)key);
-    dump_ppm(name, rgba, u->level_w[0], u->level_h[0]);
-    g_free(name);
-}
-
-/* the target after one of the first draws since the mode change (ATI_R100_DUMP_DRAWS) */
-static void dump_draw(ATIRenderer *r, GLRTarget *t, const GLRCmd *c)
-{
-    ATIGL *gl = &r->gl;
-    const ATIDrawState *st = &c->st;
-    unsigned w = t->w, h = MIN((unsigned)st->color.h, t->h);
-    uint8_t *rgba;
-    char *name;
-    static unsigned n;
-
-    if (!dump_dir()) {
-        return;
-    }
-    if (qatomic_read(&dump_draws) < 0) {
-        qatomic_set(&dump_draws, dump_draw_limit());
-    }
-    if (qatomic_read(&dump_draws) <= 0 || !w || !h) {
-        return;
-    }
-    qatomic_dec(&dump_draws);
-    rgba = g_malloc((size_t)w * 4 * h);
-    gl->PixelStorei(GL_PACK_ALIGNMENT, 1);
-    gl->ReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
-    name = g_strdup_printf("draw_%04u_mc%08x_prim%u_n%u_sc%d.%d-%d.%d_z%d.%x.%d_"
-                           "bl%d_cm%x_cull%d.%x_tex%x_stg%x_at%d.%x.%d_st%d_"
-                           "v%d.%d.%d.%d_%d.%d_%d.%d_tex0fmt%d.%ux%u.s%d.png%d.ppm",
-                           n++, st->color.mc, c->prim, c->nv,
-                           st->scissor ? st->sc_x0 : -1, st->sc_y0, st->sc_x1,
-                           st->sc_y1, st->z_test, st->z_func, st->z_write,
-                           st->blend, st->color_mask, st->cull_enable,
-                           st->cull_face, st->tex_enable, st->stage_enable,
-                           st->alpha_test, st->alpha_func,
-                           (int)(st->alpha_ref * 255), st->stencil,
-                           (int)c->v[0].x, (int)c->v[0].y,
-                           (int)(c->v[0].z * 1000), (int)(c->v[0].rhw * 1000),
-                           c->nv > 1 ? (int)c->v[1].x : 0,
-                           c->nv > 1 ? (int)c->v[1].y : 0,
-                           c->nv > 2 ? (int)c->v[2].x : 0,
-                           c->nv > 2 ? (int)c->v[2].y : 0,
-                           st->tex[0].img.fmt, st->tex[0].img.w,
-                           st->tex[0].img.h, st->tex[0].img.swap,
-                           st->persp_tex);
-    dump_ppm(name, rgba, w, h);
-    g_free(name);
-    g_free(rgba);
-}
-
 static void glr_upload(ATIRenderer *r, GLRCmd *c)
 {
     ATIGL *gl = &r->gl;
@@ -948,7 +794,6 @@ static void glr_read(ATIRenderer *r, GLRCmd *c)
             }
         }
         gl->ReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
-        dump_readback(&c->img, rgba, w, h);
         for (unsigned y = 0; y < h; y++) {
             encode_row(rgba + (size_t)y * w * 4, c->data + y * c->img.pitch, w,
                        c->img.fmt, c->img.swap, c->img.mc + y * c->img.pitch);
@@ -1054,9 +899,6 @@ static void glr_tex(ATIRenderer *r, GLRCmd *c)
             } else {
                 memset(rgba + y * w * 4, 0, w * 4);
             }
-        }
-        if (l == 0) {
-            dump_texture(u, c->key, rgba);
         }
         gl->TexImage2D(GL_TEXTURE_2D, l, GL_RGBA8, w, h, 0, GL_RGBA,
                        GL_UNSIGNED_BYTE, rgba);
@@ -1198,15 +1040,7 @@ static void glr_draw(ATIRenderer *r, GLRCmd *c)
         gl->Uniform1i(r->u_tex_en, te);
     }
     {
-        static int noalpha = -1;
         GLint av[4] = { st->alpha_func, st->alpha_test, 0, 0 };
-
-        if (noalpha < 0) {
-            noalpha = g_getenv("ATI_R100_NOALPHATEST") != NULL;
-        }
-        if (noalpha) {
-            av[1] = 0;      /* debug: draw as if the alpha test were off */
-        }
         GLint fg[4] = { st->fog, st->fog_src, 0, 0 };
         GLint fl[4] = { st->flat, st->specular, st->solid_color, st->persp_tex };
         gl->Uniform4iv(r->u_alpha, 1, av);
@@ -1220,7 +1054,6 @@ static void glr_draw(ATIRenderer *r, GLRCmd *c)
     gl->BufferData(GL_ARRAY_BUFFER, c->nv * sizeof(ATIVertex), c->v,
                    GL_STREAM_DRAW);
     gl->DrawArrays(c->prim, 0, c->nv);
-    dump_draw(r, t, c);
 }
 
 /* ---------------------------------------------------------------------
@@ -1380,62 +1213,11 @@ const char *ati_glr_info(ATIRenderer *r)
     return r->info;
 }
 
-/*
- * Debug: ATI_R100_DRAWLOG="x0,y0,x1,y1[,max[,texw]]" logs (qemu_log, -D file) the
- * state of draws whose vertices all lie inside that window rectangle, at
- * most max (default 300) of them; texw: only draws whose unit 0 texture has
- * that width.
- */
-static void glr_drawlog(const ATIDrawState *st, uint16_t prim,
-                        const ATIVertex *v, unsigned nv)
-{
-    static int init, left, texw;
-    static float rx0, ry0, rx1, ry1;
-    float z0 = 1e30f, z1 = -1e30f, w0 = 1e30f, w1 = -1e30f;
-    float a0 = 1e30f, a1 = -1e30f, f0 = 1e30f, f1 = -1e30f;
-
-    if (!init) {
-        const char *e = g_getenv("ATI_R100_DRAWLOG");
-        int m = 300;
-        init = 1;
-        if (e && sscanf(e, "%f,%f,%f,%f,%d,%d", &rx0, &ry0, &rx1, &ry1, &m, &texw) >= 4) {
-            left = m;
-        }
-    }
-    if (left <= 0 || !nv || (texw && st->tex[0].img.w != texw)) {
-        return;
-    }
-    for (unsigned i = 0; i < nv; i++) {
-        if (v[i].x < rx0 || v[i].x > rx1 || v[i].y < ry0 || v[i].y > ry1) {
-            return;
-        }
-        z0 = MIN(z0, v[i].z); z1 = MAX(z1, v[i].z);
-        w0 = MIN(w0, v[i].rhw); w1 = MAX(w1, v[i].rhw);
-        a0 = MIN(a0, v[i].c0[3]); a1 = MAX(a1, v[i].c0[3]);
-        f0 = MIN(f0, v[i].c1[3]); f1 = MAX(f1, v[i].c1[3]);
-    }
-    left--;
-    qemu_log("drawlog prim %u nv %u x %.0f y %.0f z %.4f..%.4f rhw %.4f..%.4f "
-             "a %.2f..%.2f fogf %.2f..%.2f | tcl %d ztest %d zwrite %d zfunc 0x%x "
-             "blend %d 0x%x 0x%x atest %d 0x%x %.2f fog %d src %d col %.2f,%.2f,%.2f "
-             "tex 0x%x stages 0x%x cb0 0x%08x ab0 0x%08x t0 %ux%u fmt %u spec %d "
-             "cmask 0x%x\n",
-             prim, nv, v[0].x, v[0].y, z0, z1, w0, w1, a0, a1, f0, f1,
-             st->tcl, st->z_test, st->z_write, st->z_func, st->blend,
-             st->blend_src, st->blend_dst, st->alpha_test, st->alpha_func,
-             st->alpha_ref, st->fog, st->fog_src, st->fog_color[0],
-             st->fog_color[1], st->fog_color[2], st->tex_enable,
-             st->stage_enable, st->stage[0].cblend, st->stage[0].ablend,
-             st->tex[0].img.w, st->tex[0].img.h, st->tex[0].img.fmt,
-             st->specular, st->color_mask);
-}
-
 void ati_glr_draw(ATIRenderer *r, const ATIDrawState *st, uint16_t prim,
                   const ATIVertex *v, unsigned nv)
 {
     GLRCmd *c = g_new0(GLRCmd, 1);
 
-    glr_drawlog(st, prim, v, nv);
 
     c->kind = CMD_DRAW;
     c->st = *st;

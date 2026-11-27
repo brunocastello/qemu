@@ -135,7 +135,6 @@ void ati_glr_depth_clear(ATIRenderer *r, const ATIImage *color,
  * ati_vram_hash() of the pitch * h bytes at out once written.
  */
 uint64_t ati_glr_target_read(ATIRenderer *r, const ATIImage *img, uint8_t *out);
-void ati_glr_dump_reset(void);
 typedef struct ATIReadJob {
     ATIImage img;
     uint8_t *buf;
