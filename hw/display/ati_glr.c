@@ -876,12 +876,24 @@ static void dump_draw(ATIRenderer *r, GLRTarget *t, const GLRCmd *c)
     gl->PixelStorei(GL_PACK_ALIGNMENT, 1);
     gl->ReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
     name = g_strdup_printf("draw_%04u_mc%08x_prim%u_n%u_sc%d.%d-%d.%d_z%d.%x.%d_"
-                           "bl%d_cm%x_cull%d.%x_tex%x_stg%x.ppm",
+                           "bl%d_cm%x_cull%d.%x_tex%x_stg%x_at%d.%x.%d_st%d_"
+                           "v%d.%d.%d.%d_%d.%d_%d.%d_tex0fmt%d.%ux%u.s%d.png%d.ppm",
                            n++, st->color.mc, c->prim, c->nv,
                            st->scissor ? st->sc_x0 : -1, st->sc_y0, st->sc_x1,
                            st->sc_y1, st->z_test, st->z_func, st->z_write,
                            st->blend, st->color_mask, st->cull_enable,
-                           st->cull_face, st->tex_enable, st->stage_enable);
+                           st->cull_face, st->tex_enable, st->stage_enable,
+                           st->alpha_test, st->alpha_func,
+                           (int)(st->alpha_ref * 255), st->stencil,
+                           (int)c->v[0].x, (int)c->v[0].y,
+                           (int)(c->v[0].z * 1000), (int)(c->v[0].rhw * 1000),
+                           c->nv > 1 ? (int)c->v[1].x : 0,
+                           c->nv > 1 ? (int)c->v[1].y : 0,
+                           c->nv > 2 ? (int)c->v[2].x : 0,
+                           c->nv > 2 ? (int)c->v[2].y : 0,
+                           st->tex[0].img.fmt, st->tex[0].img.w,
+                           st->tex[0].img.h, st->tex[0].img.swap,
+                           st->persp_tex);
     dump_ppm(name, rgba, w, h);
     g_free(name);
     g_free(rgba);
@@ -1169,7 +1181,15 @@ static void glr_draw(ATIRenderer *r, GLRCmd *c)
     gl->Uniform1i(r->u_stage_en, st->stage_enable);
     gl->Uniform1i(r->u_tex_en, st->tex_enable);
     {
+        static int noalpha = -1;
         GLint av[4] = { st->alpha_func, st->alpha_test, 0, 0 };
+
+        if (noalpha < 0) {
+            noalpha = g_getenv("ATI_R100_NOALPHATEST") != NULL;
+        }
+        if (noalpha) {
+            av[1] = 0;      /* debug: draw as if the alpha test were off */
+        }
         GLint fg[4] = { st->fog, st->fog_src, 0, 0 };
         GLint fl[4] = { st->flat, st->specular, st->solid_color, st->persp_tex };
         gl->Uniform4iv(r->u_alpha, 1, av);
