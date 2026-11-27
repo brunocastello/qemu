@@ -1565,7 +1565,7 @@ void tcg_init(size_t tb_size, int splitwx, unsigned max_cpus)
  * Allocate TBs right before their corresponding translated code, making
  * sure that TBs and code are on different cache lines.
  */
-TranslationBlock *tcg_tb_alloc(TCGContext *s)
+TranslationBlock *tcg_tb_alloc(TCGContext *s, size_t extra)
 {
     uintptr_t align = qemu_icache_linesize;
     TranslationBlock *tb;
@@ -1573,7 +1573,7 @@ TranslationBlock *tcg_tb_alloc(TCGContext *s)
 
  retry:
     tb = (void *)ROUND_UP((uintptr_t)s->code_gen_ptr, align);
-    next = (void *)ROUND_UP((uintptr_t)(tb + 1), align);
+    next = (void *)ROUND_UP((uintptr_t)(tb + 1) + extra, align);
 
     if (unlikely(next > s->code_gen_highwater)) {
         if (tcg_region_alloc(s)) {

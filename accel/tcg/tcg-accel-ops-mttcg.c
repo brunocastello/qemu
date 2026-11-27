@@ -25,6 +25,7 @@
 
 #include "qemu/osdep.h"
 #include "system/tcg.h"
+#include "accel/tcg/handoff.h"
 #include "system/replay.h"
 #include "system/cpu-timers.h"
 #include "qemu/main-loop.h"
@@ -135,6 +136,9 @@ static void *mttcg_cpu_thread_fn(void *arg)
                  * reset by another thread by the time we arrive here.
                  */
                 break;
+            case EXCP_HANDOFF:
+                tcg_handoff->run(cpu);
+                break;
             case EXCP_ATOMIC:
                 bql_unlock();
                 cpu_exec_step_atomic(cpu);
@@ -159,6 +163,9 @@ static void *mttcg_cpu_thread_fn(void *arg)
 void mttcg_kick_vcpu_thread(CPUState *cpu)
 {
     cpu_exit(cpu);
+    if (unlikely(tcg_handoff)) {
+        tcg_handoff->kick(cpu);
+    }
 }
 
 void mttcg_start_vcpu_thread(CPUState *cpu)

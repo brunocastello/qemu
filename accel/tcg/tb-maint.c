@@ -804,6 +804,15 @@ void tb_flush(CPUState *cpu)
     }
 }
 
+void queue_tb_flush(CPUState *cs)
+{
+    if (tcg_enabled()) {
+        unsigned tb_flush_count = qatomic_read(&tb_ctx.tb_flush_count);
+        async_safe_run_on_cpu(cs, do_tb_flush,
+                              RUN_ON_CPU_HOST_INT(tb_flush_count));
+    }
+}
+
 /* remove @orig from its @n_orig-th jump list */
 static inline void tb_remove_from_jmp_list(TranslationBlock *orig, int n_orig)
 {

@@ -8,3 +8,7 @@ i386_system_ss.add(when: ['CONFIG_TCG', 'CONFIG_SYSTEM_ONLY'], if_true: files(
   'svm_helper.c',
   'seg_helper.c',
 ))
+if hvdbt.found()
+  # 64-bit long-mode state only: qemu-system-i386 has no lstar/cstar/fmask
+  i386_system_ss.add(when: 'TARGET_X86_64', if_true: [files('hvdbt.c'), hvdbt])
+endif

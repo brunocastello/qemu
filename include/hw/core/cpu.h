@@ -1016,6 +1016,9 @@ void free_queued_cpu_work(CPUState *cpu);
  */
 void process_queued_cpu_work(CPUState *cpu);
 
+/* A non-TCG execution loop must also yield to QEMU's exclusive operations. */
+bool cpu_exclusive_pending(void);
+
 /**
  * cpu_exec_start:
  * @cpu: The CPU for the current thread.

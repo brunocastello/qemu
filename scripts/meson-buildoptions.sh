@@ -63,6 +63,8 @@ meson_options_help() {
   printf "%s\n" '  --enable-ubsan           enable undefined behaviour sanitizer'
   printf "%s\n" '  --firmwarepath=VALUES    search PATH for firmware files [share/qemu-'
   printf "%s\n" '                           firmware]'
+  printf "%s\n" '  --hvdbt-engine=VALUE     ARM hybrid x86 engine package with a built release'
+  printf "%s\n" '                           library'
   printf "%s\n" '  --iasl=VALUE             Path to ACPI disassembler'
   printf "%s\n" '  --includedir=VALUE       Header file directory [include]'
   printf "%s\n" '  --interp-prefix=VALUE    where to find shared libraries etc., use %M for'
@@ -356,6 +358,7 @@ _meson_option_parse() {
     --disable-hvf) printf "%s" -Dhvf=disabled ;;
     --enable-hvf-private) printf "%s" -Dhvf_private=true ;;
     --disable-hvf-private) printf "%s" -Dhvf_private=false ;;
+    --hvdbt-engine=*) quote_sh "-Dhvdbt_engine=$2" ;;
     --iasl=*) quote_sh "-Diasl=$2" ;;
     --enable-iconv) printf "%s" -Diconv=enabled ;;
     --disable-iconv) printf "%s" -Diconv=disabled ;;

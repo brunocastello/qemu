@@ -49,6 +49,7 @@
 #include "tb-internal.h"
 #include "exec/translator.h"
 #include "exec/tb-flush.h"
+#include "exec/tcg-handoff-code.h"
 #include "qemu/bitmap.h"
 #include "qemu/qemu-print.h"
 #include "qemu/main-loop.h"
@@ -303,7 +304,7 @@ static int setjmp_gen_code(CPUArchState *env, TranslationBlock *tb,
 /* Called with mmap_lock held for user mode emulation.  */
 TranslationBlock *tb_gen_code(CPUState *cpu,
                               vaddr pc, uint64_t cs_base,
-                              uint32_t flags, int cflags)
+                              uint32_t flags, int cflags, bool *reused)
 {
     CPUArchState *env = cpu_env(cpu);
     TranslationBlock *tb, *existing_tb;
@@ -312,6 +313,8 @@ TranslationBlock *tb_gen_code(CPUState *cpu,
     int gen_code_size, search_size, max_insns;
     int64_t ti;
     void *host_pc;
+
+    *reused = false;
 
     assert_memory_lock();
     qemu_thread_jit_write();
@@ -331,7 +334,8 @@ TranslationBlock *tb_gen_code(CPUState *cpu,
 
  buffer_overflow:
     assert_no_pages_locked();
-    tb = tcg_tb_alloc(tcg_ctx);
+    tb = tcg_tb_alloc(tcg_ctx, (cflags & CF_HANDOFF_GUARD) ?
+                      sizeof(TcgHandoffCode) : 0);
     if (unlikely(!tb)) {
         /* flush must be done */
         tb_flush(cpu);
@@ -379,6 +383,11 @@ TranslationBlock *tb_gen_code(CPUState *cpu,
 #endif
 
  restart_translate:
+    if (cflags & CF_HANDOFF_GUARD) {
+        TcgHandoffCode *code = tcg_handoff_code(tb);
+        memset(code, 0, sizeof(*code));
+        code->consistent = true;
+    }
     trace_translate_block(tb, pc, tb->tc.ptr);
 
     gen_code_size = setjmp_gen_code(env, tb, pc, host_pc, &max_insns, &ti);
@@ -588,10 +597,9 @@ TranslationBlock *tb_gen_code(CPUState *cpu,
 
     /* if the TB already exists, discard what we just translated */
     if (unlikely(existing_tb != tb)) {
-        uintptr_t orig_aligned = (uintptr_t)gen_code_buf;
-
-        orig_aligned -= ROUND_UP(sizeof(*tb), qemu_icache_linesize);
-        qatomic_set(&tcg_ctx->code_gen_ptr, (void *)orig_aligned);
+        *reused = true;
+        /* Also discard any guarded-code metadata preceding gen_code_buf. */
+        qatomic_set(&tcg_ctx->code_gen_ptr, (void *)tb);
         tcg_tb_remove(tb);
         return existing_tb;
     }

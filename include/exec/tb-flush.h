@@ -23,6 +23,16 @@
  */
 void tb_flush(CPUState *cs);
 
+/**
+ * queue_tb_flush() - add flush to the cpu work queue
+ * @cs: CPUState
+ *
+ * Flush all translation blocks the next time @cs processes the work queue.
+ * This should generally be followed by cpu_loop_exit(), so that the work
+ * queue is processed promptly.
+ */
+void queue_tb_flush(CPUState *cs);
+
 void tcg_flush_jmp_cache(CPUState *cs);
 
 #endif /* _TB_FLUSH_H_ */
