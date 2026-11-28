@@ -54,6 +54,7 @@
 #include "hw/ppc/ppc.h"
 #include "hw/qdev-properties.h"
 #include "hw/nvram/mac_nvram.h"
+#include "hw/nvram/chrp_nvram.h"
 #include "hw/boards.h"
 #include "hw/pci-host/uninorth.h"
 #include "hw/input/adb.h"
@@ -476,10 +477,37 @@ static void ppc_core99_init(MachineState *machine)
     sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(dev), 0, nvram_addr);
     nvr = MACIO_NVRAM(dev);
-    if (core99_machine->osx_nvram) {
-        pmac_format_nvram_banks(nvr, MACIO_NVRAM_SIZE);
-    } else {
-        pmac_format_nvram_partition(nvr, MACIO_NVRAM_SIZE);
+    {
+        /*
+         * With a backing file (-global macio-nvram.drive=...), what the
+         * guest saved survives: Mac OS keeps its PRAM there, including the
+         * display mode its video driver starts in, so without it every boot
+         * came up at the driver's default size before Mac OS restored the
+         * user's.  Only Open Firmware's variables partition is laid out
+         * afresh, so -prom-env still applies.  A blank file is formatted.
+         */
+        g_autofree uint8_t *saved = NULL;
+        unsigned keep_from = 0;
+
+        if (nvr->blk && nvr->data[0] == CHRP_NVPART_SYSTEM) {
+            /* osx-nvram: Mac OS X's own bank, the second half; otherwise
+             * everything past Open Firmware's system partition */
+            keep_from = core99_machine->osx_nvram ? MACIO_NVRAM_SIZE :
+                        lduw_be_p(&nvr->data[2]) * 16;
+            if (keep_from && keep_from < nvr->size) {
+                saved = g_memdup2(nvr->data, nvr->size);
+            }
+        }
+        if (core99_machine->osx_nvram) {
+            pmac_format_nvram_banks(nvr, MACIO_NVRAM_SIZE);
+        } else {
+            pmac_format_nvram_partition(nvr, MACIO_NVRAM_SIZE);
+        }
+        if (saved && (core99_machine->osx_nvram ||
+                      lduw_be_p(&nvr->data[2]) * 16 == keep_from)) {
+            memcpy(nvr->data + keep_from, saved + keep_from,
+                   nvr->size - keep_from);
+        }
     }
     /* No PCI init: the BIOS will do it */
 
