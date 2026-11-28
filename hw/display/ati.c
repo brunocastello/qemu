@@ -1119,12 +1119,40 @@ static void ati_mm_write_reg(void *opaque, hwaddr addr,
      * the enable bits are changed or output bits changed while enabled.
      */
     case GPIO_VGA_DDC ... GPIO_VGA_DDC + 3:
-        if (s->dev_id != PCI_DEVICE_ID_ATI_RAGE128_PF) {
-            /* FIXME: Maybe add a property to select VGA or DVI port? */
+        if (ati_is_radeon(s)) {
+            /*
+             * The Radeon's monitor is a CRT on the VGA port, the output this
+             * model emulates (CRTC1 + DAC; no TMDS/flat-panel path), so its
+             * EDID is on the VGA DDC.
+             */
+            ati_reg_write_offs(&s->regs.gpio_vga_ddc,
+                               addr - GPIO_VGA_DDC, data, size);
+            if ((addr <= GPIO_VGA_DDC + 2 && addr + size > GPIO_VGA_DDC + 2) ||
+                (addr == GPIO_VGA_DDC && (s->regs.gpio_vga_ddc & 0x30000))) {
+                s->regs.gpio_vga_ddc = ati_i2c(&s->bbi2c,
+                                               s->regs.gpio_vga_ddc, 0);
+            }
         }
         break;
     case GPIO_DVI_DDC ... GPIO_DVI_DDC + 3:
-        if (s->dev_id != PCI_DEVICE_ID_ATI_RAGE128_PF) {
+        if (ati_is_radeon(s)) {
+            /*
+             * Nothing on the DVI port: its DDC lines read back high unless
+             * the card itself drives them low (output enabled, value 0).
+             */
+            uint32_t v;
+
+            ati_reg_write_offs(&s->regs.gpio_dvi_ddc,
+                               addr - GPIO_DVI_DDC, data, size);
+            v = s->regs.gpio_dvi_ddc & ~0x300u;
+            if (!((v & 0x10000) && !(v & 1))) {
+                v |= 0x100;
+            }
+            if (!((v & 0x20000) && !(v & 2))) {
+                v |= 0x200;
+            }
+            s->regs.gpio_dvi_ddc = v;
+        } else if (s->dev_id != PCI_DEVICE_ID_ATI_RAGE128_PF) {
             ati_reg_write_offs(&s->regs.gpio_dvi_ddc,
                                addr - GPIO_DVI_DDC, data, size);
             if ((addr <= GPIO_DVI_DDC + 2 && addr + size > GPIO_DVI_DDC + 2) ||
@@ -1733,6 +1761,24 @@ static void ati_vga_realize(PCIDevice *dev, Error **errp)
      */
     qemu_edid_generate(s->i2cddc.edid_blob, sizeof(s->i2cddc.edid_blob),
                        &s->i2cddc.edid_info);
+    if (ati_is_radeon(s)) {
+        /*
+         * A CRT on the VGA port: analog video input (0.7 V, separate and
+         * composite sync, sync on green) and an RGB colour display.  With a
+         * digital EDID on DVI, Mac OS's ATI driver takes its flat-panel
+         * (TMDS) path, which this model does not emulate: non-standard sizes
+         * such as 1512x948 hung the boot or showed a strip a few lines high.
+         */
+        uint8_t *e = s->i2cddc.edid_blob;
+        unsigned sum = 0;
+
+        e[20] = 0x0e;
+        e[24] = (e[24] & ~0x18) | 0x08;
+        for (int i = 0; i < 127; i++) {
+            sum += e[i];
+        }
+        e[127] = (uint8_t)(-sum);
+    }
     qdev_realize(DEVICE(&s->i2cddc), BUS(i2cbus), &error_abort);
 
     /* mmio register space */
