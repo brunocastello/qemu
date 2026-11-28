@@ -934,6 +934,15 @@ static unsigned ati_2d_packet_header(ATIVGAState *s, const uint32_t *d,
         qemu_log_mask(LOG_UNIMP, "ati: CP 2D brush type %u\n", brush);
         break;
     }
+    /*
+     * GMC_LD_BRUSH_Y_X: a BRUSH_Y_X dword follows the brush.  Mac OS 9's ATI
+     * driver sets it on its CNTL_PAINT XOR (ROP 0x50, gray pattern) packets;
+     * ignoring it read the brush origin as the first corner, so a 1x1 paint
+     * at the pointer became a rectangle from (0,0) to the pointer.
+     */
+    if ((gmc & GMC_LD_BRUSH_Y_X) && i < n) {
+        ati_reg_write(s, BRUSH_Y_X, d[i++]);
+    }
     return i;
 }
 

@@ -469,6 +469,7 @@
 #define GMC_AUX_CLIP_CLEAR                      0x20000000
 #define GMC_DST_CLR_CMP_FCN_CLEAR               0x10000000
 #define GMC_WRITE_MASK_SET                      0x40000000
+#define GMC_LD_BRUSH_Y_X                        0x80000000
 #define GMC_DP_CONVERSION_TEMP_6500             0x00000000
 
 /* DP_GUI_MASTER_CNTL ROP3 named constants */
