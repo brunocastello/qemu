@@ -1740,44 +1740,6 @@ static const MemoryRegionOps ati_mm_ops = {
     .endianness = DEVICE_LITTLE_ENDIAN,
 };
 
-/*
- * An 18-byte EDID detailed timing for w x h at 60 Hz with VESA CVT reduced
- * blanking (160-pixel horizontal blank, at least 460 us of vertical blank).
- * The preferred size already has its own: the slot keeps a dummy descriptor.
- */
-static void ati_edid_dtd(uint8_t *d, unsigned w, unsigned h,
-                         const qemu_edid_info *info)
-{
-    unsigned hb = 160, hfp = 48, hs = 32, vfp = 3;
-    unsigned vs = w * 10 == h * 16 ? 6 : w * 9 == h * 16 ? 5 : 10;
-    /* lines in 460 us of a 60 Hz frame of h + vb lines */
-    unsigned vb = (h * 460 + (16667 - 460) - 1) / (16667 - 460) + 1;
-    unsigned clk;
-
-    memset(d, 0, 18);
-    if (w == info->prefx && h == info->prefy) {
-        d[3] = 0x10;    /* dummy descriptor */
-        return;
-    }
-    if (vb < vfp + vs + 6) {
-        vb = vfp + vs + 6;
-    }
-    /* pixel clock in 10 kHz, rounded to the 250 kHz CVT step */
-    clk = ((w + hb) * (h + vb) * 60 / 250000 + 1) * 25;
-    d[0] = clk & 0xff;
-    d[1] = clk >> 8;
-    d[2] = w & 0xff;
-    d[3] = hb & 0xff;
-    d[4] = ((w >> 8) << 4) | (hb >> 8);
-    d[5] = h & 0xff;
-    d[6] = vb & 0xff;
-    d[7] = ((h >> 8) << 4) | (vb >> 8);
-    d[8] = hfp;
-    d[9] = hs;
-    d[10] = ((vfp & 15) << 4) | (vs & 15);
-    d[17] = 0x1a;       /* separate sync, +hsync, -vsync */
-}
-
 static void ati_vga_realize(PCIDevice *dev, Error **errp)
 {
     ATIVGAState *s = ATI_VGA(dev);
@@ -1845,7 +1807,8 @@ static void ati_vga_realize(PCIDevice *dev, Error **errp)
      * it again with them: the detailed timing becomes the size asked for,
      * and Mac OS's ATI driver offers that size as a display mode.
      */
-    qemu_edid_generate(s->i2cddc.edid_blob, 128, &s->i2cddc.edid_info);
+    qemu_edid_generate(s->i2cddc.edid_blob, sizeof(s->i2cddc.edid_blob),
+                       &s->i2cddc.edid_info);
     if (ati_is_radeon(s)) {
         /*
          * A CRT on the VGA port: analog video input (0.7 V, separate and
@@ -1861,44 +1824,44 @@ static void ati_vga_realize(PCIDevice *dev, Error **errp)
         e[24] = (e[24] & ~0x18) | 0x08;
         /*
          * ATI's 2001 Mac OS 9 driver predates the EDID 1.3 meaning of
-         * standard-timing aspect 00 (16:10) and drops those modes, and it
-         * offers only the sizes of its own table otherwise.  Describe the
-         * other sizes Mac OS 9 guests use as detailed timings: two in the
-         * slots of the established-timings-III and name descriptors (which
-         * the driver does not use; the preferred mode and range limits
-         * stay), six more in a CEA-861 extension block.
+         * standard-timing aspect 00 (16:10) and drops those modes, so
+         * 1680x1050 and 1440x900 never reached the Monitors list.  Describe
+         * them as detailed timings (VESA CVT reduced blanking) in the slots
+         * of the established-timings-III and name descriptors, which the
+         * driver does not use; the preferred mode and range limits stay.
          */
         {
-            static const uint16_t base_modes[][2] = {
-                { 1680, 1050 }, { 1440, 900 },
-            };
-            static const uint16_t ext_modes[][2] = {
-                { 1280, 800 }, { 1152, 768 }, { 1280, 854 },
-                { 1440, 960 }, { 1600, 900 }, { 1600, 1024 },
+            static const struct {
+                uint16_t clk, ha, hb, hfp, hs, va, vb, vfp, vs;
+            } dt[2] = {
+                { 11900, 1680, 160, 48, 32, 1050, 30, 3, 6 },
+                {  8875, 1440, 160, 48, 32,  900, 26, 3, 6 },
             };
             static const unsigned slot[2] = { 72, 108 };
-            uint8_t *x = e + 128;
 
-            for (int k = 0; k < ARRAY_SIZE(base_modes); k++) {
-                ati_edid_dtd(e + slot[k], base_modes[k][0], base_modes[k][1],
-                             &s->i2cddc.edid_info);
+            for (int k = 0; k < 2; k++) {
+                uint8_t *d = e + slot[k];
+
+                if (dt[k].ha == s->i2cddc.edid_info.prefx &&
+                    dt[k].va == s->i2cddc.edid_info.prefy) {
+                    continue; /* already the preferred timing */
+                }
+                memset(d, 0, 18);
+                d[0] = dt[k].clk & 0xff;
+                d[1] = dt[k].clk >> 8;
+                d[2] = dt[k].ha & 0xff;
+                d[3] = dt[k].hb & 0xff;
+                d[4] = ((dt[k].ha >> 8) << 4) | (dt[k].hb >> 8);
+                d[5] = dt[k].va & 0xff;
+                d[6] = dt[k].vb & 0xff;
+                d[7] = ((dt[k].va >> 8) << 4) | (dt[k].vb >> 8);
+                d[8] = dt[k].hfp & 0xff;
+                d[9] = dt[k].hs & 0xff;
+                d[10] = ((dt[k].vfp & 15) << 4) | (dt[k].vs & 15);
+                d[11] = ((dt[k].hfp >> 8) << 6) | ((dt[k].hs >> 8) << 4) |
+                        ((dt[k].vfp >> 4) << 2) | (dt[k].vs >> 4);
+                d[17] = 0x1a; /* separate sync, +hsync, -vsync */
             }
-            memset(x, 0, 128);
-            x[0] = 0x02;        /* CEA-861 extension */
-            x[1] = 3;           /* revision */
-            x[2] = 4;           /* detailed timings start right away */
-            for (int k = 0; k < ARRAY_SIZE(ext_modes); k++) {
-                ati_edid_dtd(x + 4 + 18 * k, ext_modes[k][0], ext_modes[k][1],
-                             &s->i2cddc.edid_info);
-            }
-            sum = 0;
-            for (int i = 0; i < 127; i++) {
-                sum += x[i];
-            }
-            x[127] = (uint8_t)(-sum);
-            e[126] = 1;         /* one extension block */
-            s->i2cddc.edid_len = 256;
-            sum = 0;
         }
         for (int i = 0; i < 127; i++) {
             sum += e[i];
