@@ -3394,12 +3394,11 @@ static void r300_render(PPCMacGPUState *s, uint32_t opcode, const uint32_t *d,
             break;
         }
     }
-    /* Only layers written red first (US_OUT_FMT_0 C0_SEL = R, as the Dock
-     * and Core Image do): System Preferences also renders COLOR_ENDIAN 0
-     * layers with C0 = B, and those read right as they are. */
+    /* Every COLOR_ENDIAN 0 layer, whatever its channel order: the Dock and
+     * Core Image write theirs red first (US_OUT_FMT_0 C0_SEL = R), PowerFox's
+     * OpenGL compositor blue first (C0 = B), and both hold card order. */
     r300_e0_note(pkt.rt_gpu_addr, pkt.rt_pitch * pkt.rt_bpp * pkt.rt_height * ns,
-                 pkt.rt_bpp == 4 && pkt.uniforms.rt_endian == 0 &&
-                 ((r300_reg(s->r3, 0x46A4) >> 8) & 3) == 1);
+                 pkt.rt_bpp == 4 && pkt.uniforms.rt_endian == 0);
     for (int t = 0; t < R300_NUM_TEX_UNITS; t++) {
         R300TexDesc *td = &pkt.tex[t];
         uint64_t tlen = td->size_bytes;     /* the whole mip chain */
@@ -3408,12 +3407,12 @@ static void r300_render(PPCMacGPUState *s, uint32_t opcode, const uint32_t *d,
         }
         uint32_t ga = td->gpu_addr;
         if (r300_to_vram(s, &td->gpu_addr, tlen)) {
-            /* Only as the guest samples its own card-order layers: red
-             * from X (RGBA order).  CPU uploads read as ARGB (red from Z)
-             * that land where a layer was stay as they are, whatever
-             * write path we failed to see. */
+            /* A card-order layer reads the other way round from the CPU's
+             * view, whichever swizzle samples it (the Dock: red from X;
+             * PowerFox's page, drawn by its GL compositor: red from Z, which
+             * came out purple and washed out).  Writes over a layer end its
+             * record (r300_e0_forget, and the CPU through the dirty log). */
             if (td->kind == R300_TEXK_RGBA8 && !(td->endian & 1) &&
-                pkt.uniforms.tex_swz[t][0] == 0 &&
                 r300_e0_has(s, td->gpu_addr)) {
                 pkt.uniforms.tex_info[t][1] ^= 1;
             }
