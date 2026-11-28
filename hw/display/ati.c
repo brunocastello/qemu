@@ -1893,6 +1893,14 @@ static void ati_vga_realize(PCIDevice *dev, Error **errp)
         e[20] = 0x0e;
         e[24] = (e[24] & ~0x18) | 0x08;
         /*
+         * No 1152x870 (Apple's established timing): Mac OS 9's ATI driver
+         * starts in it whenever the monitor offers it, before the Display
+         * Manager restores the user's mode, so the screen changed size
+         * during every boot.  Without it the driver starts in the
+         * preferred mode, the size the VM was started with.
+         */
+        e[37] &= ~0x80;
+        /*
          * Detailed timings in VESA CVT reduced blanking, which is what Mac
          * OS 9 saves a chosen mode as: the preferred size (QEMU's generic
          * timing for it was not one the driver matched to a saved mode, so
