@@ -347,6 +347,41 @@ static void ati_cursor_define(ATIVGAState *s)
                                  s->vga.hw_cursor_y + 63);
         return;
     }
+    if (!s->cursor) {
+        s->cursor = cursor_alloc(64, 64);
+    }
+    if (ati_is_radeon(s) && ((s->regs.crtc_gen_cntl >> 20) & 7) >= 2 &&
+        ((s->regs.crtc_gen_cntl >> 20) & 7) <= 3) {
+        /*
+         * Radeon 32-bit ARGB cursor (CUR_MODE 2/3, what ATI's driver uses
+         * in millions of colours): 64 pixels of 4 bytes per row. CUR_OFFSET
+         * already skips the rows clipped at the top, so step back to the
+         * image's first row; the clipped origin becomes the hot spot so the
+         * host draws the whole image at the right place.
+         */
+        unsigned xorigin = (s->regs.cur_hv_offs >> 16) & 63;
+        unsigned yorigin = s->regs.cur_hv_offs & 63;
+        uint64_t base = (uint64_t)(s->regs.cur_offset & 0x07ffffff);
+
+        if (base < yorigin * 256) {
+            return;
+        }
+        base -= yorigin * 256;
+        if (base + 64 * 256 > s->vga.vram_size) {
+            return;
+        }
+        for (int i = 0; i < 64 * 64; i++) {
+            const uint8_t *p = s->vga.vram_ptr + base + i * 4;
+            s->cursor->data[i] = s->vga.big_endian_fb ? ldl_be_p(p)
+                                                      : ldl_le_p(p);
+        }
+        s->cursor->hot_x = xorigin;
+        s->cursor->hot_y = yorigin;
+        dpy_cursor_define(s->vga.con, s->cursor);
+        return;
+    }
+    s->cursor->hot_x = 0;
+    s->cursor->hot_y = 0;
     /* FIXME handle cur_hv_offs correctly */
     srcoff = s->regs.cur_offset - (s->regs.cur_hv_offs >> 16) -
              (s->regs.cur_hv_offs & 0xffff) * 16;
@@ -356,9 +391,6 @@ static void ati_cursor_define(ATIVGAState *s)
     for (int i = 0; i < 64; i++, srcoff += 16) {
         data[i] = ldq_le_p(&s->vga.vram_ptr[srcoff]);
         data[i + 64] = ldq_le_p(&s->vga.vram_ptr[srcoff + 8]);
-    }
-    if (!s->cursor) {
-        s->cursor = cursor_alloc(64, 64);
     }
     cursor_set_mono(s->cursor, s->regs.cur_color1, s->regs.cur_color0,
                     (uint8_t *)&data[64], 1, (uint8_t *)&data[0]);
@@ -1081,6 +1113,11 @@ static void ati_mm_write_reg(void *opaque, hwaddr addr,
                               s->regs.cur_hv_pos & 0xffff,
                               (s->regs.crtc_gen_cntl & CRTC2_CUR_EN) != 0);
             }
+        } else if (!s->cursor_guest_mode &&
+                   (s->regs.crtc_gen_cntl & CRTC2_CUR_EN) &&
+                   ((val ^ s->regs.crtc_gen_cntl) & (7 << 20))) {
+            /* Cursor format changed (mono <-> ARGB) while it is shown. */
+            ati_cursor_define(s);
         }
         if ((val & (CRTC2_EXT_DISP_EN | CRTC2_EN | CRTC_PIX_WIDTH_MASK)) !=
             (s->regs.crtc_gen_cntl &
