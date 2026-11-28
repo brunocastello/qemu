@@ -372,8 +372,19 @@ static void ati_cursor_define(ATIVGAState *s)
         }
         for (int i = 0; i < 64 * 64; i++) {
             const uint8_t *p = s->vga.vram_ptr + base + i * 4;
-            s->cursor->data[i] = s->vga.big_endian_fb ? ldl_be_p(p)
-                                                      : ldl_le_p(p);
+            uint32_t v = s->vga.big_endian_fb ? ldl_be_p(p) : ldl_le_p(p);
+            uint32_t a = v >> 24, out = v & 0xff000000;
+
+            /*
+             * ATI's driver writes straight (non-premultiplied) ARGB: its
+             * transparent pixels are 0x00ffffff.  Display backends composite
+             * cursors as premultiplied (SPICE/UTM showed them as a solid
+             * magenta square), so premultiply here.
+             */
+            for (unsigned sh = 0; sh < 24; sh += 8) {
+                out |= ((((v >> sh) & 255) * a + 127) / 255) << sh;
+            }
+            s->cursor->data[i] = out;
         }
         s->cursor->hot_x = xorigin;
         s->cursor->hot_y = yorigin;
