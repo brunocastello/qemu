@@ -168,7 +168,7 @@ ati_display_vram(uint64_t start, uint64_t line240) "vram[start] 0x%016"PRIx64" v
 ati_3d_readback(int async, uint32_t mc, unsigned w, unsigned h, unsigned pitch, unsigned fmt, unsigned swap) "async %d mc 0x%08x %ux%u pitch %u fmt %u swap %u"
 ati_3d_mode_drop(int n) "dropped %d tracked render targets"
 ati_pll_read(int idx, uint32_t val) "pll[0x%02x] -> 0x%08x"
-ati_cp_packet0(uint32_t reg, unsigned count, bool one) "reg 0x%04x count %u one %d"
+ati_cp_packet0(uint32_t reg, unsigned count, bool one, uint32_t first) "reg 0x%04x count %u one %d first 0x%08x"
 ati_cp_packet3(uint8_t op, unsigned count) "op 0x%02x count %u"
 ati_cp_ib(uint32_t base, uint32_t ndw) "base 0x%08x dwords %u"
 ati_cp_ring(uint32_t rptr, uint32_t wptr, unsigned n) "rptr %u wptr %u dwords %u"

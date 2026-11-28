@@ -993,12 +993,17 @@ void ati_2d_packet(ATIVGAState *s, uint8_t op, const uint32_t *d, unsigned n)
         break;
     case 0x92:  /* CNTL_BITBLT */
     case 0x9b:  /* CNTL_BITBLT_MULTI: src (x<<16|y), dst, (w<<16|h) */
-    case 0x9c:  /* CNTL_TRANS_BITBLT: + CLR_CMP_CNTL, CLR_CMP_CLR, mask */
+    case 0x9c:  /* CNTL_TRANS_BITBLT: + CLR_CMP_CNTL, CLR_CMP_CLR_SRC,
+                   CLR_CMP_CLR_DST.  The compare mask is not part of the
+                   packet: Mac OS 9's ATI driver loads CLR_CMP_MASK with a
+                   type-0 write just before (alpha-only, to skip the pixels
+                   outside an icon's mask); overwriting it with the third
+                   dword drew icons as solid squares. */
         i = ati_2d_packet_header(s, d, n);
         if (op == 0x9c && i + 2 < n) {
             ati_reg_write(s, CLR_CMP_CNTL, d[i++]);
             ati_reg_write(s, CLR_CMP_CLR_SRC, d[i++]);
-            ati_reg_write(s, CLR_CMP_MASK, d[i++]);
+            ati_reg_write(s, CLR_CMP_CLR_DST, d[i++]);
         }
         for (; i + 2 < n; i += 3) {
             ati_reg_write(s, SRC_X_Y, d[i]);

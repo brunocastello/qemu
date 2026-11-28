@@ -161,7 +161,7 @@ static unsigned ati_cp_packet(ATIVGAState *s, const uint32_t *pkt,
         if (avail < count + 1) {
             return 0;
         }
-        trace_ati_cp_packet0(reg, count, one);
+        trace_ati_cp_packet0(reg, count, one, pkt[1]);
         for (i = 0; i < count; i++) {
             ati_reg_write(s, one ? reg : reg + 4 * i, pkt[1 + i]);
         }
