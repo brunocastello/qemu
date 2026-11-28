@@ -31,7 +31,9 @@ struct I2CDDCState {
     bool firstbyte;
     uint8_t reg;
     qemu_edid_info edid_info;
-    uint8_t edid_blob[128];
+    /* base block, plus one extension block for a device that sets edid_len */
+    uint8_t edid_blob[256];
+    uint16_t edid_len;      /* bytes the monitor returns: 128 unless set */
 };
 
 

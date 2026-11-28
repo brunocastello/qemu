@@ -58,7 +58,7 @@ static uint8_t i2c_ddc_rx(I2CSlave *i2c)
     I2CDDCState *s = I2CDDC(i2c);
 
     int value;
-    value = s->edid_blob[s->reg % sizeof(s->edid_blob)];
+    value = s->edid_blob[s->reg % (s->edid_len ? s->edid_len : 128)];
     s->reg++;
     return value;
 }
@@ -82,7 +82,7 @@ static void i2c_ddc_init(Object *obj)
 {
     I2CDDCState *s = I2CDDC(obj);
 
-    qemu_edid_generate(s->edid_blob, sizeof(s->edid_blob), &s->edid_info);
+    qemu_edid_generate(s->edid_blob, 128, &s->edid_info);
 }
 
 static const VMStateDescription vmstate_i2c_ddc = {
