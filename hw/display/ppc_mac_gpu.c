@@ -3141,8 +3141,12 @@ static void r300_aa_resolve(PPCMacGPUState *s, const R300DrawPacket *pkt)
  * Only textures at a record's base count: the Dock samples its layers
  * from there, and "anywhere inside" caught unrelated textures.
  */
-#define R300_E0_RANGES 64
-static struct { uint32_t base, size; } r300_e0[R300_E0_RANGES];
+/* Every card-order (COLOR_ENDIAN 0) colour buffer is kept: evicting one makes
+ * its surface sample with the wrong byte order (Aqua blue turns pink), which a
+ * fixed 64-entry table did with many windows open.  Freed slots are reused. */
+static struct R300E0Range { uint32_t base, size; } *r300_e0;
+static int r300_e0_n, r300_e0_cap;
+#define R300_E0_RANGES r300_e0_n
 
 static void r300_e0_forget(uint64_t base, uint64_t len)
 {
@@ -3159,7 +3163,6 @@ static void r300_e0_note(uint32_t base, uint32_t size, bool e0)
 {
     r300_e0_forget(base, size);
     if (e0) {
-        static unsigned next;
         int slot = -1;
         for (int i = 0; i < R300_E0_RANGES && slot < 0; i++) {
             if (!r300_e0[i].size) {
@@ -3167,7 +3170,11 @@ static void r300_e0_note(uint32_t base, uint32_t size, bool e0)
             }
         }
         if (slot < 0) {
-            slot = (int)(next++ % R300_E0_RANGES);
+            if (r300_e0_n == r300_e0_cap) {
+                r300_e0_cap = r300_e0_cap ? r300_e0_cap * 2 : 64;
+                r300_e0 = g_renew(struct R300E0Range, r300_e0, r300_e0_cap);
+            }
+            slot = r300_e0_n++;
         }
         r300_e0[slot].base = base;
         r300_e0[slot].size = size;
