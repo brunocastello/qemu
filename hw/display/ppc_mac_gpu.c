@@ -49,14 +49,9 @@
 #include "hw/display/ppc_mac_gpu_vp.h"
 #include "trace.h"
 
-/* Device writes to VRAM: dirty for the display, and the end of any
- * card-order colour buffer record they overlap (see r300_e0_note). */
-static void r300_e0_forget(uint64_t base, uint64_t len);
-#define ppc_vram_dirty_e0(s, off, len) do {                     \
-        uint64_t off_ = (off), len_ = (len);                    \
-        memory_region_set_dirty(&(s)->vram, off_, len_);        \
-        r300_e0_forget(off_, len_);                             \
-    } while (0)
+/* Device writes to VRAM: dirty for the display. */
+#define ppc_vram_dirty_e0(s, off, len) \
+        memory_region_set_dirty(&(s)->vram, (off), (len))
 
 /* UniNorth AGP bridge GART base — defined in hw/pci-host/uninorth.c */
 hwaddr uninorth_get_agp_gart_base(void);
@@ -2802,7 +2797,10 @@ static void r300_cmask_clear(PPCMacGPUState *s)
     }
     r200_vram_access(s, off, off + bpr * rows, true, 8);
     if (bpp == 4) {
-        r200_pattern_fill(vram + off, bpr * rows, r300_swap_mode(v, endian), 4);
+        /* 32-bit buffers hold the CPU's view for COLOR_ENDIAN 0 and 2 alike
+         * (see rt_swap32 in r300_draw.c). */
+        r200_pattern_fill(vram + off, bpr * rows,
+                          r300_swap_mode(v, endian == 0 ? 2 : endian), 4);
     } else {
         r200_pattern_fill(vram + off, bpr * rows,
                           endian == 1 || endian == 2 ? bswap16(v) : v, 2);
@@ -3075,10 +3073,11 @@ static void r300_aa_resolve(PPCMacGPUState *s, const R300DrawPacket *pkt)
         static float degamma[256];
         static uint8_t regamma[4096];
         bool gamma = ctl & 2, alpha_avg = ctl & 4;
-        /* The byte alpha lands in: the ARGB dword in COLOR_ENDIAN order,
-         * stored little-endian (as 3D_CLEAR_CMASK writes it). */
-        uint32_t amask = r300_swap_mode(0xFF000000u,
-                                        (r300_reg(s->r3, 0x4E38) >> 19) & 3);
+        /* The byte alpha lands in: the ARGB dword in COLOR_ENDIAN order
+         * (0 as 2, see rt_swap32), stored little-endian (as
+         * 3D_CLEAR_CMASK writes it). */
+        uint32_t e = (r300_reg(s->r3, 0x4E38) >> 19) & 3;
+        uint32_t amask = r300_swap_mode(0xFF000000u, e == 0 ? 2 : e);
         int ab = ctz32(amask) / 8;
 
         if (gamma && degamma[255] == 0.0f) {
@@ -3121,114 +3120,6 @@ static void r300_aa_resolve(PPCMacGPUState *s, const R300DrawPacket *pkt)
                  "%u samples%s\n", pkt->rt_gpu_addr, spitch, dst, dpitch, ix0,
                  iy0, w, h, ns, avg && (ctl & 2) ? ", gamma 2.2" : "");
     }
-}
-
-/*
- * Colour buffers written with COLOR_ENDIAN 0 hold the card's own byte
- * order, while RGBA8 texture decode assumes the CPU's (reversed for no
- * TXO swap, see r300_draw.c).  Leopard's Dock renders its stack and
- * icon-flash layers that way (tiled, COLOR_ENDIAN 0, sampled back with
- * an R=X swizzle): read with the CPU's order, alpha landed in red and
- * the fades flashed red/pink.  Remember the VRAM ranges last rendered
- * like that and decode RGBA8 textures that start at one of them the
- * other way round.
- *
- * A record ends when anything else writes over its range: a CPU-order
- * render or a device write (ppc_vram_dirty_e0), or the guest CPU, which
- * the VGA dirty log shows (cleared for the range when the record is
- * made).  Without that, System Preferences' Aqua controls, uploaded by
- * the CPU where a Core Image layer had been, came out pink and faded.
- * Only textures at a record's base count: the Dock samples its layers
- * from there, and "anywhere inside" caught unrelated textures.
- */
-/* Every card-order (COLOR_ENDIAN 0) colour buffer is kept: evicting one makes
- * its surface sample with the wrong byte order (Aqua blue turns pink), which a
- * fixed 64-entry table did with many windows open.  Freed slots are reused. */
-static struct R300E0Range { uint32_t base, size; } *r300_e0;
-static int r300_e0_n, r300_e0_cap;
-#define R300_E0_RANGES r300_e0_n
-
-static void r300_e0_forget(uint64_t base, uint64_t len)
-{
-    for (int i = 0; i < R300_E0_RANGES; i++) {
-        if (r300_e0[i].size && base < (uint64_t)r300_e0[i].base + r300_e0[i].size &&
-            r300_e0[i].base < base + len) {
-            r300_e0[i].size = 0;
-        }
-    }
-}
-
-/* A colour buffer about to be written: COLOR_ENDIAN 0 (e0) or not. */
-static void r300_e0_note(uint32_t base, uint32_t size, bool e0)
-{
-    r300_e0_forget(base, size);
-    if (e0) {
-        int slot = -1;
-        for (int i = 0; i < R300_E0_RANGES && slot < 0; i++) {
-            if (!r300_e0[i].size) {
-                slot = i;
-            }
-        }
-        if (slot < 0) {
-            if (r300_e0_n == r300_e0_cap) {
-                r300_e0_cap = r300_e0_cap ? r300_e0_cap * 2 : 64;
-                r300_e0 = g_renew(struct R300E0Range, r300_e0, r300_e0_cap);
-            }
-            slot = r300_e0_n++;
-        }
-        r300_e0[slot].base = base;
-        r300_e0[slot].size = size;
-    }
-}
-
-/* After the draw marked its colour buffer dirty: start watching the
- * record's range for CPU writes (off-screen only; the scanout keeps its
- * own dirty bits). */
-static bool r300_e0_on_screen(PPCMacGPUState *s, uint32_t base, uint32_t size)
-{
-    uint64_t fb0 = s->disp.offset;
-    uint64_t fb1 = fb0 + (uint64_t)s->disp.stride * s->disp.height;
-
-    return base < fb1 && fb0 < (uint64_t)base + size;
-}
-
-static void r300_e0_arm(PPCMacGPUState *s, uint32_t base, uint32_t size)
-{
-    if (r300_e0_on_screen(s, base, size)) {
-        return;
-    }
-    for (int i = 0; i < R300_E0_RANGES; i++) {
-        if (r300_e0[i].size && r300_e0[i].base == base) {
-            memory_region_reset_dirty(&s->vram, base, size, DIRTY_MEMORY_VGA);
-            return;
-        }
-    }
-}
-
-static bool r300_e0_has(PPCMacGPUState *s, uint32_t addr)
-{
-    for (int i = 0; i < R300_E0_RANGES; i++) {
-        if (r300_e0[i].size && addr == r300_e0[i].base) {
-            uint32_t len = r300_e0[i].size;
-            /* Watched ranges only (see r300_e0_arm); reading the log
-             * clears it, which nothing else uses off-screen. */
-            if (s->renderer && !s->renderer->set_dirty_source &&
-                !r300_e0_on_screen(s, addr, len)) {
-                DirtyBitmapSnapshot *snap =
-                    memory_region_snapshot_and_clear_dirty(&s->vram, addr, len,
-                                                           DIRTY_MEMORY_VGA);
-                bool written = memory_region_snapshot_get_dirty(&s->vram, snap,
-                                                                addr, len);
-                g_free(snap);
-                if (written) {
-                    r300_e0[i].size = 0;    /* written since: CPU data now */
-                    return false;
-                }
-            }
-            return true;
-        }
-    }
-    return false;
 }
 
 static void r300_render(PPCMacGPUState *s, uint32_t opcode, const uint32_t *d,
@@ -3394,11 +3285,6 @@ static void r300_render(PPCMacGPUState *s, uint32_t opcode, const uint32_t *d,
             break;
         }
     }
-    /* Every COLOR_ENDIAN 0 layer, whatever its channel order: the Dock and
-     * Core Image write theirs red first (US_OUT_FMT_0 C0_SEL = R), PowerFox's
-     * OpenGL compositor blue first (C0 = B), and both hold card order. */
-    r300_e0_note(pkt.rt_gpu_addr, pkt.rt_pitch * pkt.rt_bpp * pkt.rt_height * ns,
-                 pkt.rt_bpp == 4 && pkt.uniforms.rt_endian == 0);
     for (int t = 0; t < R300_NUM_TEX_UNITS; t++) {
         R300TexDesc *td = &pkt.tex[t];
         uint64_t tlen = td->size_bytes;     /* the whole mip chain */
@@ -3407,15 +3293,6 @@ static void r300_render(PPCMacGPUState *s, uint32_t opcode, const uint32_t *d,
         }
         uint32_t ga = td->gpu_addr;
         if (r300_to_vram(s, &td->gpu_addr, tlen)) {
-            /* A card-order layer reads the other way round from the CPU's
-             * view, whichever swizzle samples it (the Dock: red from X;
-             * PowerFox's page, drawn by its GL compositor: red from Z, which
-             * came out purple and washed out).  Writes over a layer end its
-             * record (r300_e0_forget, and the CPU through the dirty log). */
-            if (td->kind == R300_TEXK_RGBA8 && !(td->endian & 1) &&
-                r300_e0_has(s, td->gpu_addr)) {
-                pkt.uniforms.tex_info[t][1] ^= 1;
-            }
             continue;
         }
         /* AGP/GART texture: copy the texels out of guest memory (freed
@@ -3678,10 +3555,6 @@ static void r300_render(PPCMacGPUState *s, uint32_t opcode, const uint32_t *d,
                                             (uint64_t)pkt.cb[k].pitch * pkt.cb[k].bpp *
                                             pkt.rt_height);
                 }
-            }
-            if (!s->renderer->set_dirty_source && pkt.rt_bpp == 4 &&
-                pkt.uniforms.rt_endian == 0) {
-                r300_e0_arm(s, pkt.rt_gpu_addr, (uint32_t)len);
             }
             r200_rate.draws++;
             r200_perf.draws++;

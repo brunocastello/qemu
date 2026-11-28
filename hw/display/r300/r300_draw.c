@@ -493,7 +493,17 @@ static void set_uniforms(const R300State *st, R300DrawPacket *pkt)
     for (int n = 0; n < 4; n++) {
         u->out_sel[n] = (outfmt >> (8 + 2 * n)) & 3;
     }
-    u->rt_swap32 = ((r300_reg(st, RB3D_COLORPITCH0) >> 19) & 3) == 2;
+    /*
+     * 32-bit colour buffers land in the CPU's (big-endian) view of VRAM for
+     * COLOR_ENDIAN 0 and 2 alike: Tiger samples a COLOR_ENDIAN 0 layer
+     * (PowerFox's OpenGL compositor) and a COLOR_ENDIAN 2 window surface
+     * with the same texture setup, and both read right on the card, as do
+     * the CPU uploads that share the layer's texture.
+     */
+    {
+        uint32_t e = (r300_reg(st, RB3D_COLORPITCH0) >> 19) & 3;
+        u->rt_swap32 = e == 0 || e == 2;
+    }
     u->rt_endian = (r300_reg(st, RB3D_COLORPITCH0) >> 19) & 3;
     u->clip_rule = r300_reg(st, SC_CLIP_RULE) & 0xFFFF;
     for (int i = 0; i < 4; i++) {

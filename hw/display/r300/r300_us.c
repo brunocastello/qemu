@@ -1195,7 +1195,7 @@ static void us_emit_cb(R300Sb *sb, const R300State *st, unsigned k)
     } else {
         snprintf(sel, sizeof(sel), "uvec4(%uu, %uu, %uu, %uu)", (ofr >> 8) & 3,
                  (ofr >> 10) & 3, (ofr >> 12) & 3, (ofr >> 14) & 3);
-        snprintf(swap, sizeof(swap), "%uu", e == 2);
+        snprintf(swap, sizeof(swap), "%uu", e == 0 || e == 2);
     }
     for (int n = 0; n < 4; n++) {
         sg[n] = (ofr >> (16 + n)) & 1;
