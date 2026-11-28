@@ -332,6 +332,41 @@ static void ati_vga_gfx_update(void *opaque)
     }
 }
 
+/*
+ * The card's own view of a 32-bit word of VRAM.  VRAM holds the bytes as the
+ * guest CPU wrote them, and a Radeon's CPU apertures swap bytes on the way
+ * (CONFIG_CNTL.APER_n_ENDIAN, SURFACE_CNTL.NONSURF_APn_SWP: 1 = within 16
+ * bits, 2 = 32 bits, 3 = 16-bit halves).  Mac OS 9's ATI driver writes its
+ * frame buffer and cursor through aperture 1 with the swap of the current
+ * depth (16 bits in thousands of colours, 32 in millions) and pre-swaps the
+ * cursor's ARGB words to match, so read them back through that swap.
+ */
+static uint32_t ati_card_word(ATIVGAState *s, const uint8_t *p)
+{
+    uint32_t surf = s->regfile[SURFACE_CNTL / 4];
+    unsigned m = (surf >> 22) & 3;
+
+    if (!m) {
+        m = (s->regs.config_cntl >> 2) & 3;
+    }
+    if (!m) {
+        m = (surf >> 20) & 3;
+    }
+    if (!m) {
+        m = s->regs.config_cntl & 3;
+    }
+    switch (m) {
+    case 1:
+        return p[1] | p[0] << 8 | p[3] << 16 | (uint32_t)p[2] << 24;
+    case 2:
+        return ldl_be_p(p);
+    case 3:
+        return p[2] | p[3] << 8 | p[0] << 16 | (uint32_t)p[1] << 24;
+    default:
+        return ldl_le_p(p);
+    }
+}
+
 /* Used by host side hardware cursor */
 static void ati_cursor_define(ATIVGAState *s)
 {
@@ -372,7 +407,7 @@ static void ati_cursor_define(ATIVGAState *s)
         }
         for (int i = 0; i < 64 * 64; i++) {
             const uint8_t *p = s->vga.vram_ptr + base + i * 4;
-            uint32_t v = s->vga.big_endian_fb ? ldl_be_p(p) : ldl_le_p(p);
+            uint32_t v = ati_card_word(s, p);
             uint32_t a = v >> 24, out = v & 0xff000000;
 
             /*
@@ -469,7 +504,7 @@ static void ati_cursor_draw_line(VGACommonState *vga, uint8_t *d, int scr_y)
         dp += vga->hw_cursor_x;
         for (unsigned i = 0; i < 64 - xorigin && vga->hw_cursor_x + i < h; i++) {
             const uint8_t *pixel = vga->vram_ptr + source + (i + xorigin) * 4;
-            uint32_t src = vga->big_endian_fb ? ldl_be_p(pixel) : ldl_le_p(pixel);
+            uint32_t src = ati_card_word(s, pixel);
             unsigned alpha = src >> 24;
             uint32_t out = 0xff000000;
 
